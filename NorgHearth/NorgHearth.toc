@@ -1,0 +1,8 @@
+## Interface: 30300
+## Title: Norg Hearth
+## Notes: Keep several hearthstone destinations and pick between them. Innkeeper binds only.
+## Author: Norg
+## Version: 1.0
+## SavedVariables: NorgHearthDB
+
+NorgHearth.lua

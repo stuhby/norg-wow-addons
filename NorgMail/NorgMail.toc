@@ -1,0 +1,7 @@
+## Interface: 30300
+## Title: NorgMail
+## Notes: Empty the mailbox from one button. Skips C.O.D. and GM mail.
+## Version: 1.5
+## Author: Norg
+
+NorgMail.lua

@@ -1,0 +1,9 @@
+## Interface: 30300
+## Title: Norg Nav
+## Notes: Live pathfinding arrow using the server's navmesh. Alternative to NorgDungeons.
+## Author: Norg
+## Version: 2.6
+## SavedVariables: NorgNavDB
+
+Data.lua
+NorgNav.lua

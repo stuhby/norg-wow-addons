@@ -1,0 +1,9 @@
+## Interface: 30300
+## Title: Norg Dungeons
+## Notes: Dungeon and raid maps with boss order and live kill tracking.
+## Author: Norg
+## Version: 1.0
+## SavedVariables: NorgDungeonsDB
+
+Data.lua
+NorgDungeons.lua

@@ -17,6 +17,14 @@
 ------------------------------------------------------------------------------]]
 
 local ADDON = "NorgRoutes"
+
+-- (!) THE VERSION IS READ FROM THE .toc, NEVER COPIED INTO A CONSTANT HERE. The
+-- login line is step one of the wiki's troubleshooting page, and a second copy of
+-- the number drifts from the .toc in silence, and nothing in the game can then
+-- tell you which of the two you are reading. "?" means the client never indexed
+-- this folder, which is itself the answer to "why is nothing happening".
+local VERSION = GetAddOnMetadata(ADDON, "Version") or "?"
+
 local frame, content, lines = nil, nil, {}
 local currentMap = nil
 
@@ -170,7 +178,8 @@ ev:SetScript("OnEvent", function(_, event)
 
         local n = 0
         for _ in pairs(NorgRoutes or {}) do n = n + 1 end
-        local msg = "|cff00ff00NorgRoutes|r loaded: " .. n .. " instances. /route to open."
+        local msg = "|cff00ff00NorgRoutes|r v" .. VERSION ..
+            " loaded: " .. n .. " instances. /route to open."
         if IsAddOnLoaded and IsAddOnLoaded("Atlas") then
             msg = msg .. " |cff808080(Atlas detected)|r"
         end

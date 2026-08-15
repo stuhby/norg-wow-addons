@@ -28,10 +28,15 @@ COMMANDS
   /nav             resume automatic routing in encounter order
   /nav next        skip the current boss (behind a door, or you want another)
   /nav <name>      route to one boss and stay on it
-  /nav list        what is in here, and what is already down
+  /nav list        what is in here, what is down, and what you skipped
+  /nav reset       forget every down/skipped mark and re-check with the server
   /nav off         stop
   /nav debug       show exactly what the server is sending
   /nav help        this list
+
+  A boss you skip with /nav next stays skipped until you leave the instance or
+  type /nav reset. It is listed as (skipped) rather than (down), because the
+  two are different things and only one of them is your decision.
 
   Drag the arrow panel anywhere; it remembers where you put it.
 
@@ -44,12 +49,31 @@ WHAT THE COLOURS AND WORDING MEAN
       You have walked as far as walking goes. The rest needs a swim, a drop, or
       another way in. The arrow is now a direct line.
 
-  Amber, "no walking route"
-      There is no walkable path to this boss from where you stand. The arrow is
-      taking you as close as it gets. This is normal and correct in a handful of
-      places -- across the water in Blackfathom Deeps, between the disconnected
-      wings of Scarlet Monastery, and anywhere the fight starts on a vehicle or
-      a drake.
+  Amber, "mapped path ends short -- last stretch is on you"
+      The server's map of walkable ground runs out before it reaches the boss.
+      KEEP WALKING: this is usually a short gap inside the same room -- measured
+      in Wailing Caverns, it ends 34 yards from Lord Serpentis and 52 from
+      Verdan. It does NOT mean you cannot get there. It also covers the genuinely
+      separated cases -- across the water in Blackfathom Deeps, between the
+      disconnected wings of Scarlet Monastery, and anywhere the fight starts on a
+      vehicle or a drake.
+
+      (This entry used to be listed here as "no walking route", which is a string
+      the addon has never printed and a meaning it deliberately avoids -- people
+      read it as "you cannot get there" and gave up on bosses they could reach.)
+
+  Grey arrow, "..." and "finding a route"
+      The route has been requested and the server has not answered yet. The boss
+      name is already the new one; the distance is deliberately blank rather than
+      showing the previous boss's number, which would be a confident figure about
+      somewhere you are no longer going.
+
+      It clears the moment the server answers. If the request went missing
+      entirely the addon gives the answer up for lost a couple of seconds later,
+      says once that it got no answer, and falls back to asking which bosses are
+      down. It says that once per silence, not once per route -- so if you ask
+      for several routes while something is swallowing them, you get one line,
+      not one each.
 
   Amber, "direct line, no map data here"
       Neither you nor the boss is standing on the navmesh. Platform fights like
@@ -60,18 +84,23 @@ WHAT THE COLOURS AND WORDING MEAN
 
 
 SCRIPT-SPAWNED FINAL BOSSES
-  57 of the game's 434 encounters have no creature anywhere in the world until a
-  script summons them. Mutanus the Devourer -- the LAST boss of Wailing Caverns --
-  is one, which is why clearing all seven listed bosses used to end with "all
-  routable bosses down" while the real final fight was still ahead of you.
+  57 of the 418 encounters this addon carries have no creature anywhere in the
+  world until a script summons them. Mutanus the Devourer -- the LAST boss of
+  Wailing Caverns -- is one, which is why clearing all seven listed bosses used
+  to end with "all routable bosses down" while the real final fight was still
+  ahead of you.
 
   Those now route to the EVENT TRIGGER instead, labelled "Start:" with a line
   explaining what happens there. For Wailing Caverns that is Naralex, which is
   exactly where Mutanus appears.
 
-  Only encounters with a hand-verified trigger location are included. The rest
-  are still left out rather than guessed at -- an arrow pointing confidently at
-  nothing is worse than no arrow.
+  54 of the 57 carry such a point. The other three are impossible rather than
+  unknown: the Trial of the Crusader arena floor is a destructible gameobject
+  and the navmesh has no polygons there at all, so Icehowl, Lord Jaraxxus and
+  Eydis Darkbane cannot be routed to by any coordinate. Those three are listed
+  with a note and no arrow rather than aimed at a guess -- an arrow pointing
+  confidently at nothing is worse than no arrow. An encounter whose trigger
+  location has not been verified by hand is not carried at all.
 
   It cannot see door state. Navmeshes model geometry, not whether a gate happens
   to be shut or needs a key, so a route can lead you to a closed door. What it
@@ -87,10 +116,3 @@ HOW IT KNOWS WHERE YOU ARE
 RELATED
   NorgDungeons -- map artwork and a boss checklist. Different approach to the
   same problem; run either or both, they do not conflict.
-
-  48 of those 57 now have a verified approach point, derived from the server's
-  own instance scripts and each one checked against the navmesh. The remaining
-  nine are deliberately absent rather than guessed. Three of them are impossible
-  rather than unknown: the Trial of the Crusader arena floor is a destructible
-  gameobject and the navmesh has no polygons there at all, so Icehowl, Jaraxxus
-  and Eydis Darkbane cannot be routed to by any coordinate.

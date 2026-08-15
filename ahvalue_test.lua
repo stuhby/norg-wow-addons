@@ -83,12 +83,29 @@ _G.UIDropDownMenu_GetSelectedValue = function() return _G._priceMode end
 _G.UIDropDownMenu_GetText = function() return _G._priceMode == 1 and "per item" or "per stack" end
 _G.GetAuctionDuration = function() return 3 end
 _G.UnitName = function() return "Tester" end
-_G.DEFAULT_CHAT_FRAME = { AddMessage = function() end }
+_G.DEFAULT_CHAT_FRAME = { msgs = {}, AddMessage = function(s, m) table.insert(s.msgs, m) end }
 _G.SlashCmdList = {}
 
 -- The addon reads the item id out of a scratch tooltip because 3.3.5a gives the
 -- sell slot no link API. Model that: the tooltip yields whatever is in the slot.
 _G.GameTooltip = newFrame()
+
+-- (!) GetAddOnMetadata IS REAL IN 3.3.5a -- Atlas 3.x calls it at file scope, see
+-- atlas-src/Atlas-3/Atlas/Atlas.lua:39 -- but plain Lua has no such global, so
+-- without this stub the addon's version line is a nil call the moment it loads.
+-- It READS THE ACTUAL .toc rather than returning a literal: a hardcoded answer
+-- would keep passing for ever while the addon printed something else, which is
+-- the exact drift the version line exists to stop.
+_G.GetAddOnMetadata = function(folder, field)
+    if field ~= "Version" then return nil end
+    local f = io.open("/data/" .. folder .. "/" .. folder .. ".toc")
+    if not f then return nil end
+    local v
+    for line in f:lines() do v = v or line:match("^##%s*Version:%s*(.-)%s*$") end
+    f:close()
+    return v
+end
+local TOC_VERSION = _G.GetAddOnMetadata("NorgAHValue", "Version")
 
 dofile("/data/NorgAHValue/Config.lua")
 dofile("/data/NorgAHValue/DataSell.lua")
@@ -121,6 +138,27 @@ end
 check("module loaded and hooked the auction events",
       type(NorgAHValue_Mult) == "table" and NorgAHValue_Mult[1] == 3,
       tostring(NorgAHValue_Mult and NorgAHValue_Mult[1]))
+
+-- ============================================================ the login banner
+-- The version line is the wiki's first troubleshooting step, so it is asserted
+-- like any other behaviour. Firing PLAYER_LOGIN also proves the announcement
+-- survives being the ONLY one -- NorgAHValue.lua used to print a second
+-- "loaded" line of its own on ADDON_LOADED.
+local loginFrame
+for _, fr in ipairs(allFrames) do
+    if fr._events["PLAYER_LOGIN"] and fr._scripts["OnEvent"] then loginFrame = fr end
+end
+check("registered PLAYER_LOGIN", loginFrame ~= nil)
+loginFrame._scripts["OnEvent"](loginFrame, "PLAYER_LOGIN")
+check("login banner names the version FROM THE .toc",
+      TOC_VERSION and DEFAULT_CHAT_FRAME.msgs[1]
+      and DEFAULT_CHAT_FRAME.msgs[1]:find("v" .. TOC_VERSION, 1, true),
+      DEFAULT_CHAT_FRAME.msgs[1])
+check("login banner still reports the item count",
+      DEFAULT_CHAT_FRAME.msgs[1] and DEFAULT_CHAT_FRAME.msgs[1]:find("items priced", 1, true),
+      DEFAULT_CHAT_FRAME.msgs[1])
+check("and announces itself exactly ONCE",
+      #DEFAULT_CHAT_FRAME.msgs == 1, #DEFAULT_CHAT_FRAME.msgs)
 
 -- (!) THE REGRESSION. Real numbers from the live auction house:
 --   Linen Cloth  (2589) SellPrice 13, quality 1, BuyPrice 55  -- listed x12 at 5616

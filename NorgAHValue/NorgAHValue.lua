@@ -18,8 +18,6 @@
   Vendor price is left exactly as Blizzard draws it; this only ADDS a line.
 ------------------------------------------------------------------------------]]
 
-local ADDON = "NorgAHValue"
-
 -- The label. Kept parallel to Blizzard's own "Sell Price:" so the two rows read
 -- as siblings rather than one being an addon bolt-on. Change freely.
 local LABEL = "AH Value:"
@@ -161,19 +159,19 @@ if ItemRefTooltip then
 end
 
 -- The auction house uses a separate comparison tooltip for the selected row.
+--
+-- (!) NO "loaded" LINE HERE. This handler used to print one of its own on
+-- ADDON_LOADED, which meant NorgAHValue alone announced itself TWICE at login.
+-- The single announcement -- version and item count together -- is the
+-- PLAYER_LOGIN line at the top of AutoPrice.lua. Put nothing back here.
 local f = CreateFrame("Frame")
 f:RegisterEvent("ADDON_LOADED")
 f:SetScript("OnEvent", function(_, _, name)
-    if name == "Blizzard_AuctionUI" then
-        for _, tip in ipairs({ AuctionSellItemTooltip, ItemRefTooltip }) do
-            if tip and tip.HookScript then
-                tip:HookScript("OnTooltipSetItem", AddLine)
-                tip:HookScript("OnHide", ClearFlag)
-            end
+    if name ~= "Blizzard_AuctionUI" then return end
+    for _, tip in ipairs({ AuctionSellItemTooltip, ItemRefTooltip }) do
+        if tip and tip.HookScript then
+            tip:HookScript("OnTooltipSetItem", AddLine)
+            tip:HookScript("OnHide", ClearFlag)
         end
-    elseif name == ADDON then
-        local n = 0
-        if NorgAHValue_Sell then for _ in pairs(NorgAHValue_Sell) do n = n + 1 end end
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00NorgAHValue|r loaded: " .. n .. " items priced.")
     end
 end)

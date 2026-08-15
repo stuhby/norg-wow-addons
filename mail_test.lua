@@ -31,7 +31,8 @@ end
 _G.CreateFrame = newFrame
 _G.MailFrame = newFrame("Frame", "MailFrame")
 _G.ATTACHMENTS_MAX_RECEIVE = 16
-_G.DEFAULT_CHAT_FRAME = { AddMessage = function(_, m) _G._lastMsg = m end }
+_G.DEFAULT_CHAT_FRAME = { msgs = {},
+    AddMessage = function(s, m) _G._lastMsg = m; table.insert(s.msgs, m) end }
 _G.SlashCmdList = {}
 
 _G.GetContainerNumFreeSlots = function(bag)
@@ -95,6 +96,23 @@ _G.TakeInboxMoney = function(i)
     if #(m.items or {}) == 0 and not m.hasText then table.remove(inbox, i) end
 end
 
+-- (!) GetAddOnMetadata IS REAL IN 3.3.5a -- Atlas 3.x calls it at file scope, see
+-- atlas-src/Atlas-3/Atlas/Atlas.lua:39 -- but plain Lua has no such global, so
+-- without this stub the addon's version line is a nil call the moment it loads.
+-- It READS THE ACTUAL .toc rather than returning a literal: a hardcoded answer
+-- would keep passing for ever while the addon printed something else, which is
+-- the exact drift the version line exists to stop.
+_G.GetAddOnMetadata = function(folder, field)
+    if field ~= "Version" then return nil end
+    local f = io.open("/data/" .. folder .. "/" .. folder .. ".toc")
+    if not f then return nil end
+    local v
+    for line in f:lines() do v = v or line:match("^##%s*Version:%s*(.-)%s*$") end
+    f:close()
+    return v
+end
+local TOC_VERSION = _G.GetAddOnMetadata("NorgMail", "Version")
+
 dofile("/data/NorgMail/NorgMail.lua")
 
 local pass, fail = 0, 0
@@ -102,6 +120,20 @@ local function check(name, cond, detail)
     if cond then pass = pass + 1; print("  PASS  " .. name)
     else fail = fail + 1; print("  FAIL  " .. name .. "   " .. tostring(detail)) end
 end
+
+-- ============================================================ the login banner
+-- The version line is the wiki's first troubleshooting step, so it is asserted
+-- like any other behaviour rather than assumed.
+local loginFrame
+for _, f in ipairs(frames) do
+    if f._events and f._events["PLAYER_LOGIN"] then loginFrame = f end
+end
+check("registered PLAYER_LOGIN", loginFrame ~= nil)
+loginFrame._scripts["OnEvent"](loginFrame, "PLAYER_LOGIN")
+check("login banner names the version FROM THE .toc",
+      TOC_VERSION and _G._lastMsg and _G._lastMsg:find("v" .. TOC_VERSION, 1, true), _G._lastMsg)
+check("and announces itself exactly ONCE",
+      #DEFAULT_CHAT_FRAME.msgs == 1, #DEFAULT_CHAT_FRAME.msgs)
 
 --- Run to completion, with a bound so a wedged addon fails the test instead of
 --- hanging the suite.
@@ -203,9 +235,16 @@ inbox = {
 }
 taken = { items = {}, money = 0 }; bagFree = 20; _G._iconShown = true
 runToEnd()
+-- (!) NO `or` CLAUSE HERE. This read `_iconShown == true or inbox[1].wasRead ~= nil`,
+-- and the second operand was true on every run, so the check passed while the icon
+-- was in fact being hidden -- the exact failure the comment above forbids. Assert
+-- BOTH halves separately so neither can cover for the other.
 check("icon left alone when unread mail remains",
-      _G._iconShown == true or inbox[1].wasRead ~= nil,
+      _G._iconShown == true,
       "icon hidden with unread mail present")
+check("a skipped C.O.D. mail is still flagged unread",
+      not inbox[1].wasRead,
+      "skipped C.O.D. mail was marked read, so nothing points at it any more")
 -- ============================ pending mail: the icon must SURVIVE an empty inbox
 -- (!) Auction mail is delivered on a delay. The icon lights while the mail is
 -- still on its way and the inbox is genuinely empty -- clearing it then destroys

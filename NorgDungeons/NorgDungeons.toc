@@ -2,7 +2,7 @@
 ## Title: Norg Dungeons
 ## Notes: Dungeon and raid maps with boss order and live kill tracking.
 ## Author: Norg
-## Version: 1.0
+## Version: 1.1
 ## SavedVariables: NorgDungeonsDB
 
 Data.lua

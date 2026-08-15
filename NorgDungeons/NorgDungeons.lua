@@ -19,6 +19,13 @@
 
 local ADDON = "NorgDungeons"
 
+-- (!) THE VERSION IS READ FROM THE .toc, NEVER COPIED INTO A CONSTANT HERE. The
+-- login line is step one of the wiki's troubleshooting page, and a second copy of
+-- the number drifts from the .toc in silence, and nothing in the game can then
+-- tell you which of the two you are reading. "?" means the client never indexed
+-- this folder, which is itself the answer to "why is nothing happening".
+local VERSION = GetAddOnMetadata(ADDON, "Version") or "?"
+
 local frame, mapTex, listFrame, titleFS, lines = nil, nil, nil, nil, {}
 local currentKey, killed = nil, {}
 
@@ -189,7 +196,8 @@ ev:SetScript("OnEvent", function(_, event, ...)
         end
         local n = 0
         for _ in pairs(NorgDungeons or {}) do n = n + 1 end
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00NorgDungeons|r loaded: " .. n .. " maps. /dungeon to open.")
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00NorgDungeons|r v" .. VERSION ..
+            " loaded: " .. n .. " maps. /dungeon to open.")
         return
     end
 

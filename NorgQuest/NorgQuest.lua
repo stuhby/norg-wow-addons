@@ -27,6 +27,14 @@
 local QPREFIX = "NORGQUEST"    -- our own control channel
 local NPREFIX = "NORGNAV"      -- the shared position stream we listen to
 
+-- (!) THE VERSION IS READ FROM THE .toc, NEVER COPIED INTO A CONSTANT HERE. The
+-- login line is step one of the wiki's troubleshooting page, and a second copy of
+-- the number drifts from the .toc in silence, and nothing in the game can then
+-- tell you which of the two you are reading. "?" means the client never indexed
+-- this folder, which is itself the answer to "why is nothing happening".
+local ADDON   = "NorgQuest"    -- FOLDER name; GetAddOnMetadata keys on that
+local VERSION = GetAddOnMetadata(ADDON, "Version") or "?"
+
 local COL_OK   = { 0.95, 0.95, 0.95 }
 local COL_SOFT = { 1.00, 0.82, 0.00 }
 local COL_HARD = { 1.00, 0.35, 0.35 }
@@ -42,7 +50,13 @@ local KIND_WORD = {
     k = "kill",
     g = "use",
     i = "collect",
-    e = "go to",     -- exploration / event: reach a place, or talk to somebody
+    e = "go to",     -- event: somebody to talk to, or something to watch happen
+    -- (!) 'a' IS A PLACE AND HAS NOBODY IN IT. The server used to send these as
+    -- 'e' carrying a "name" it had looked up from the QUEST id, so The Fargodeep
+    -- Mine came out as "talk to Gug Fatcandle" -- a real NPC, nowhere near the
+    -- mine. The arrow was always right; only the caption lied, which is worse
+    -- than saying nothing because the player goes looking for the NPC.
+    a = "explore",
 }
 
 local frame, arrow, nameFS, distFS, hintFS
@@ -58,6 +72,27 @@ local trackedKind, trackedX, trackedY   -- the objective we committed to
 -- large and swapping targets mid-walk is far worse than walking to a slightly
 -- further member of the group you were already heading for.
 local RETARGET_YARDS = 250
+-- (!) AN ESCORT NPC WALKS, SO COMMITTING TO HIM FOR 250 YARDS POINTS BEHIND YOU.
+-- The number above exists because a kill target has 8.6 spawns on average and the
+-- server always answers with the nearest, so simply walking makes a different one
+-- nearest and an exact-match check would swing the arrow between neighbours.
+--
+-- An event objective ('e') is USUALLY one named NPC rather than a crowd of
+-- interchangeable ones, and that is the whole argument for a tighter number here.
+-- Usually, not always -- a few event quests do name a creature with more than one
+-- spawn row, so this is a difference of degree, not a guarantee. It does not have
+-- to be a guarantee: the server reports where the NPC IS rather than where he
+-- spawned, so for an escort the answer moves because HE moved, and re-routing to
+-- his new position is the correct response rather than churn.
+--
+-- Escort paths run several hundred yards, so holding the first answer for 250 of
+-- them reproduces the exact complaint the live lookup was added to fix. 40 yards
+-- is inside "you can see him", so the arrow refreshes while he is still in sight.
+--
+-- (!) A RE-ROUTE TRIGGERED BY THIS NUMBER MUST STAY ON THE SAME QUEST. Shortening
+-- the commit without that is worse than not shortening it at all -- see the
+-- broken-commit block in AutoTrack.
+local EVENT_RETARGET_YARDS = 40
 -- A rival objective must be this many times closer AND this many yards closer
 -- before it is allowed to steal a committed pick. See AutoTrack.
 -- (!) OBJECTIVE DISTANCES GO STALE AS YOU WALK, AND EVERY DECISION USES THEM.
@@ -74,7 +109,7 @@ local SWITCH_RATIO     = 4
 local SWITCH_MIN_YARDS = 400
 local legText                -- e.g. "take Zeppelin (The Thundercaller)"
 local targetName             -- WHO or WHAT is at the objective, from the server
-local targetType             -- "c" creature, "g" gameobject
+local targetType             -- "c" creature, "g" gameobject, "a" a place (no name)
 local subscribed = false     -- is the server actually streaming to us now
 local autoMode = true
 local scanAt = 0
@@ -187,7 +222,12 @@ local function Refresh()
         -- bare kind word whenever the server sent no name, which is normal for an
         -- objective that is a PLACE rather than a thing (an area to explore).
         local what = KIND_WORD[o.kind] or "go to"
-        if targetName then
+        -- (!) NEVER NAME ANYBODY ON AN AREATRIGGER OBJECTIVE. targetType "a" means
+        -- the destination is a PLACE; there is nothing standing there to talk to,
+        -- so any name that reaches us for one is wrong by construction. The server
+        -- already sends an empty name for these -- this is the second lock, because
+        -- the failure mode is a confidently wrong instruction rather than a blank.
+        if targetName and targetType ~= "a" then
             if targetType == "g" then
                 what = "use " .. targetName
             elseif o.kind == "k" then
@@ -295,9 +335,25 @@ local function AutoTrack()
     -- that as a new objective and re-targets -- the arrow swings between
     -- neighbouring mobs of the same type instead of taking you to one of them.
     --
-    -- Only a genuinely different objective is worth switching for: the KIND
-    -- changing (kill -> turn in, say), or a position far enough away that it
-    -- cannot be the same cluster of spawns.
+    -- Only a genuinely different objective is worth switching QUEST for: the
+    -- KIND changing (kill -> turn in, say), or another quest becoming decisively
+    -- better. A position that has moved is NOT one of those -- it means the
+    -- thing we are already chasing has walked, so the answer is a fresh route to
+    -- the same quest. See the broken-commit block below; conflating the two is
+    -- what let the arrow abandon an escort mid-path.
+    --
+    -- (!) SO WHEN AN ESCORT COMPLETES, THE ARROW IS HANDED AWAY -- DECIDED, NOT
+    -- OVERLOOKED. The kind flips 'e' -> 't', sameObjective goes false, the pick
+    -- re-runs from scratch, and a nearer objective for some other quest wins even
+    -- though the turn-in NPC is standing a few yards away. Left exactly as it is,
+    -- for two reasons. A COMPLETED escort cannot be failed by walking off, unlike
+    -- one in progress -- that is the whole hazard the broken-commit block below
+    -- exists for, and it does not apply once credit is paid. And the promise this
+    -- addon makes is "the nearest objective you can actually do": a turn-in you
+    -- can already see is the one case a player does not need an arrow for. Holding
+    -- the quest for an extra scan means adding a SECOND commitment rule, keyed on a
+    -- kind change and a distance -- more commitment, which is the direction the
+    -- stubbornness fault below came from, bought for something already in sight.
     if tracked and objectives[tracked] and subscribed then
         local o = objectives[tracked]
         local moved = trackedX and
@@ -340,7 +396,51 @@ local function AutoTrack()
             end
         end
 
-        if o.kind == trackedKind and moved < RETARGET_YARDS and not jump then return end
+        -- See EVENT_RETARGET_YARDS: a moving named NPC must not be committed to
+        -- the way an interchangeable spawn cluster is.
+        --
+        -- (!) 'a' IS LEFT ON THE WIDE NUMBER ON PURPOSE, BUT NOT BECAUSE IT CANNOT
+        -- MOVE. This used to read "an areatrigger never moves, so it can never
+        -- trip either limit", and that is false. An individual trigger is fixed,
+        -- but 8 of the 61 quests in areatrigger_involvedrelation on this world
+        -- carry MORE THAN ONE, and the server answers with whichever is nearest
+        -- the player -- so the reported position CAN change between scans, and by
+        -- a long way. That is precisely the interchangeable-cluster shape
+        -- RETARGET_YARDS was written for: any one of the triggers completes the
+        -- objective, so swapping between them mid-walk is pure churn. Wide is
+        -- right here for the same reason it is right for a kill objective, not
+        -- because the case never arises.
+        local commitYards = (o.kind == "e") and EVENT_RETARGET_YARDS or RETARGET_YARDS
+        local sameObjective = (o.kind == trackedKind)
+        if sameObjective and moved < commitYards and not jump then return end
+
+        -- (!) A BROKEN COMMIT IS NOT AN INVITATION TO RE-PICK, AND TREATING IT AS
+        -- ONE CAN FAIL AN ESCORT QUEST.
+        --
+        -- The commit above breaks for two quite different reasons, and they need
+        -- opposite answers:
+        --   the objective we are tracking MOVED   -> keep the quest, refresh the
+        --                                            route to where it is now
+        --   a rival became decisively better      -> re-run the pick (`jump`)
+        -- Falling through to the pick in BOTH cases is what shortening the commit
+        -- for 'e' actually bought: every EVENT_RETARGET_YARDS the escort walked,
+        -- the arrow was handed back to whatever happened to be nearest. Measured:
+        -- escort 1144 at 15 yd, a kill objective at 5 yd, escort moved 100 yd --
+        -- the addon emitted "GO 2002" and abandoned Willix.
+        --
+        -- That is not a cosmetic regression. SmartAI drops an escort once the
+        -- player is more than SMART_ESCORT_MAX_PLAYER_DIST (60) yards away, so
+        -- following that arrow FAILS THE QUEST OUTRIGHT -- strictly worse than
+        -- the backwards arrow the live position was added to fix.
+        --
+        -- `jump` deliberately still wins: it is the escape hatch that stops the
+        -- arrow insisting on 1,673 yards away while you stand on an objective,
+        -- and it needs both a ratio AND an absolute margin, so a rival that only
+        -- looks better cannot trigger it.
+        if sameObjective and not jump then
+            Track(tracked)
+            return
+        end
     end
     Track(list[1].id)
 end
@@ -386,7 +486,12 @@ local function OnQuestMessage(msg)
         return
     end
 
-    -- G|<questId>|<c|g>|<name> -- the server routed us, and says what is there.
+    -- G|<questId>|<c|g|a>|<name> -- the server routed us, and says what is there.
+    -- The type letter is NOT the objective kind: 'c' creature, 'g' gameobject,
+    -- 'a' a PLACE, which carries an empty name because there is nobody standing
+    -- in it (see KIND_WORD and the second lock in Refresh). 'a' was added to the
+    -- server and to the declaration at the top of this file but not to this line,
+    -- which is how a reader ends up believing an areatrigger target is impossible.
     if kind == "G" then
         local id, typ, nm = msg:match("^G|(%d+)|(%a)|(.*)$")
         if id and tonumber(id) == tracked then
@@ -520,7 +625,7 @@ ev:SetScript("OnEvent", function(_, event, ...)
             frame:ClearAllPoints()
             frame:SetPoint(p, UIParent, rp, x, y)
         end
-        Say("loaded. Tracks the nearest doable objective. /quest for commands.")
+        Say("v" .. VERSION .. " loaded. Tracks the nearest doable objective. /quest for commands.")
         scanAt = 3.0
         return
     end
@@ -656,7 +761,19 @@ SlashCmdList["NORGQUEST"] = function(arg)
         autoMode = true
         tracked = nil
         AutoTrack()
-        if not tracked then Say("nothing resolvable right now. /quest scan to retry.") end
+        -- (!) SAY THE TRUE REASON. Inside a dungeon AutoTrack returns early because
+        -- NorgNav owns the arrow, so `tracked` is nil for a reason that has nothing
+        -- to do with resolution -- and "/quest scan to retry" sends the player to
+        -- re-run a scan that cannot help. The nav-took-over line elsewhere only
+        -- fires while NorgNav is stopped, so this branch is the one a player in an
+        -- instance actually reaches.
+        if not tracked then
+            if InInstanceNavCovers() then
+                Say("NorgNav has the arrow in here. /quest again once you are outside.")
+            else
+                Say("nothing resolvable right now. /quest scan to retry.")
+            end
+        end
         return
     end
 

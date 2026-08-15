@@ -30,10 +30,19 @@
 
 local PREFIX = "NORGNAV"
 
+-- (!) THE VERSION IS READ FROM THE .toc, NEVER COPIED INTO A CONSTANT HERE. The
+-- login line is step one of the wiki's troubleshooting page, and a second copy of
+-- the number drifts from the .toc in silence, and nothing in the game can then
+-- tell you which of the two you are reading. "?" means the client never indexed
+-- this folder, which is itself the answer to "why is nothing happening".
+local ADDON   = "NorgNav"   -- FOLDER name; GetAddOnMetadata keys on that
+local VERSION = GetAddOnMetadata(ADDON, "Version") or "?"
+
 -- Server statuses. See mod-norg-nav.
 --   ok       complete walkable route; the route distance is exact
---   far      walkable prefix, goal past the search horizon (should not occur --
---            the server's budget was measured to cover every route in the game)
+--   far      walkable prefix, goal past the search horizon (should not occur:
+--            the module's own sweep of the 361 boss-to-boss legs at the shipped
+--            budget returned none -- see NAV_NODE_POOL in norg_nav.cpp)
 --   direct   walked as far as possible; the rest is a straight line
 --   blocked  no walkable route to the goal; following the best partial one
 --   bearing  no navmesh under you or the goal; straight line only
@@ -58,9 +67,64 @@ local bosses = {}           -- NorgNavBosses[mapId]
 -- Caverns has exactly one g=0 entry, which is why testing never saw it.
 --
 -- The entry table is unique per boss by construction, so it cannot collide.
-local dead = {}             -- [boss entry] = true
+--
+-- (!) `dead` MEANS ONE THING ONLY: THE BOSS IS DOWN.
+-- It used to carry deliberate skips as well, and the two facts have opposite
+-- lifetimes -- the alive poll is entitled to CLEAR a death mark (a boss that
+-- evaded and hard-reset must not be skipped for the rest of the run), so a
+-- skip stored here was un-skipped by the next A|1 and the arrow dragged the
+-- player straight back to the boss they had just passed on. The poll is a
+-- free-running 20-second accumulator that /nav next does not reset, so the
+-- un-skip landed anywhere from instantly to twenty seconds later, and
+-- script-spawned bosses are never polled at all -- so the same command
+-- behaved differently depending on which boss it was aimed at, with nothing
+-- on screen to explain why. Skips live in their own set and only SetMap (or
+-- an explicit /nav reset) clears them.
+local dead = {}             -- [boss entry] = true; the server or the combat log said so
+local skipped = {}          -- [boss entry] = true; the PLAYER said so, via /nav next
 local bySpawn = {}          -- [spawnId] = { entry, ... }; only ever g > 0
 local target                -- { i, n, x, y, z, g }
+
+-- (!) WHAT THE SERVER IS WATCHING, WHICH IS NOT WHAT IS ON SCREEN.
+--
+-- S|dead carries no id -- it means "the target you are subscribed to has
+-- died" -- so the client has to know which boss the SERVER thinks that is.
+-- Our own auto-advance runs ahead of it: the combat log marks the kill
+-- instantly and we START the next boss, while the server only notices the
+-- death on its next world update and only reports it on the next nav cadence
+-- (NAV_INTERVAL_MS, norg_nav.cpp). Crediting whatever was current when the
+-- report landed therefore marked the NEXT boss down.
+--
+-- The server installs a target and answers S|started in the same breath, and
+-- a session's packets are ordered, so an S|dead can only ever refer to the
+-- START that was acknowledged before it. Tracking the acknowledgement makes
+-- the client's idea of the subscription lag its own advance by exactly as
+-- much as the server does.
+--
+-- (!) A QUEUE POSITION IS ONLY AS GOOD AS ITS AGE -- ONE LOST REPLY POISONS
+-- EVERY LATER KILL, FOREVER, AND NO DEPTH CHECK CAN SEE IT.
+--
+-- A START whisper can be swallowed before mod-norg-nav ever sees it:
+-- ChatHandler.cpp drops the line at !CanSpeak() and again on the GM silence
+-- aura, both BEFORE the hook, so no S|started is ever generated for it. The
+-- pop is FIFO, so that one orphan sits at the head of the queue and every
+-- LATER acknowledgement pops it instead of the boss it really refers to --
+-- permanently one out of step, which credits S|dead to the previous boss for
+-- the rest of the session. Reproduced: skip a boss whose acknowledgement was
+-- lost, let the bots kill the next one, and the addon announces the SKIPPED
+-- boss down while the one that actually died stays unmarked.
+--
+-- The queue depth cannot detect that -- it oscillates between one and two and
+-- never reaches any threshold. AGE can: the reply is generated synchronously
+-- by the same handler that reads the whisper, so nothing should ever be
+-- outstanding for longer than one round trip. An entry older than
+-- ACK_TIMEOUT is one whose reply is never coming, and the OnUpdate loop
+-- retires it and drops `subscribed` -- which degrades S|dead to an ALIVE
+-- query (slower, never wrong) instead of to a wrong mark.
+local ACK_TIMEOUT = 2.0     -- seconds an unanswered START may sit in the queue
+local startQ = {}           -- { { b = entry, age = seconds }, ... }, oldest first
+local subscribed            -- the entry the server has acknowledged and is death-checking
+local ackLost = false       -- latched so a mute warns once, not every route
 local autoMode = true
 local lastStatus = "ok"
 local haveFix = false
@@ -141,6 +205,28 @@ end
 
 -- ------------------------------------------------------------------- display
 
+--- The panel's title line for one entry.
+---
+--- (!) An APPROACH entry is not the boss -- it is the place the encounter
+--- starts. Labelling it plainly would send the player looking for a mob that
+--- does not exist yet and make the arrow look wrong when they arrive to an
+--- empty room.
+---
+--- Shared by every writer of that line so they cannot drift: it is written
+--- from three places now (a live repaint, the moment a route is requested, and
+--- an entry that cannot be routed to at all) and two of them are states the
+--- player only ever sees for a fraction of a second, so a difference between
+--- them would be nearly impossible to spot on screen.
+local function SetNameLabel(b)
+    local total = #bosses
+    if total > 0 and b.i then
+        nameFS:SetText(string.format("%s%s  |cff808080(%d of %d)|r",
+            b.ap and "|cffffd100Start:|r " or "", b.n, b.i, total))
+    else
+        nameFS:SetText(b.n)
+    end
+end
+
 local function Refresh()
     if not target or not haveFix then return end
 
@@ -184,17 +270,7 @@ local function Refresh()
 
     arrow:SetVertexColor(col[1], col[2], col[3])
 
-    local total = #bosses
-    if total > 0 and target.i then
-        -- (!) An APPROACH entry is not the boss -- it is the place the encounter
-        -- starts. Labelling it plainly would send the player looking for a mob
-        -- that does not exist yet and make the arrow look wrong when they arrive
-        -- to an empty room.
-        nameFS:SetText(string.format("%s%s  |cff808080(%d of %d)|r",
-            target.ap and "|cffffd100Start:|r " or "", target.n, target.i, total))
-    else
-        nameFS:SetText(target.n)
-    end
+    SetNameLabel(target)
 
     -- The approach note explains why you are being sent somewhere the boss is
     -- not, so it matters more than any routing status and takes precedence.
@@ -226,8 +302,13 @@ end
 --- no arrow. Show the note, and no arrow.
 local function ShowUnroutable(b)
     -- Drop any live subscription first. The server keeps ONE target slot per
-    -- player, so a stream left running would go on pushing P| for a boss that is
-    -- no longer on screen -- and its S|dead would be credited to THIS entry.
+    -- player and this entry will never occupy it, so a stream left running would
+    -- go on pushing P| for a boss that is no longer on screen.
+    --
+    -- Nothing would be MIS-ATTRIBUTED by leaving it: the P| handler discards
+    -- packets while an nr=1 entry is up, and an S|dead is credited to
+    -- `subscribed` -- still that other boss -- rather than to this entry. This
+    -- is about the server not computing routes nobody is looking at.
     if target then Send("STOP") end
     target = b
     haveFix = false
@@ -235,12 +316,7 @@ local function ShowUnroutable(b)
     if frame then
         arrow:Hide()
         distFS:SetText("no route")
-        local total = #bosses
-        if total > 0 and b.i then
-            nameFS:SetText(string.format("%s  |cff808080(%d of %d)|r", b.n, b.i, total))
-        else
-            nameFS:SetText(b.n)
-        end
+        SetNameLabel(b)
         hintFS:SetText((b.t and b.t ~= "") and b.t
             or "no map data here -- stay with the group")
         frame:Show()
@@ -265,8 +341,36 @@ local function StartNav(b)
     --        only right until the event starts and the arrow would then point at
     --        the floor he left.
     Send(string.format("START %.2f %.2f %.2f %d %d", b.x, b.y, b.z, b.g or 0, b.tg or 0))
+    -- Queued, not assigned: the server has not installed this target yet, and
+    -- until it says so a death report still belongs to the PREVIOUS one. The
+    -- S|started acknowledgement is what moves it across -- see `subscribed`.
+    table.insert(startQ, { b = b, age = 0 })
+    -- (!) THIS ONLY CATCHES A FLOOD, NOT THE DRIFT THAT ACTUALLY HAPPENS.
+    -- Every START gets exactly one reply, so a queue this deep means many
+    -- replies in a row went missing. The realistic failure is ONE lost reply,
+    -- which leaves the queue permanently ONE deep and never trips any depth
+    -- threshold at all -- the age timeout in OnUpdate is what catches that, and
+    -- this is just a cheap bound on a burst of /nav commands. Both give up the
+    -- same way, because a MISSED death is repaired by the alive poll and a
+    -- MIS-CREDITED one is not.
+    if #startQ > 8 then
+        startQ = {}
+        subscribed = nil
+    end
     if frame then
         arrow:Show()   -- an nr=1 entry hides it, so put it back
+        -- (!) REPAINT THE PANEL NOW, DO NOT LEAVE THE OLD BOSS'S NUMBERS UP.
+        -- Refresh only runs once a position packet has landed, so between the
+        -- request and the first P| the panel kept the PREVIOUS route's name,
+        -- distance and hint -- a live-looking readout for a boss we had already
+        -- left. Name the new one immediately and say plainly that the distance
+        -- is not known yet; the arrow is dimmed for the same reason, since it
+        -- is still pointing at the old route's corner until the stream catches
+        -- up. Refresh sets the colour on every repaint, so this undoes itself.
+        SetNameLabel(b)
+        distFS:SetText("...")
+        hintFS:SetText("finding a route")
+        arrow:SetVertexColor(0.5, 0.5, 0.5)
         frame:Show()
     end
 end
@@ -277,9 +381,37 @@ local function CountDead()
     return n
 end
 
+-- (!) SKIPPED *AND STILL ALIVE*, because a boss can be in BOTH sets: skip one
+-- and the bots kill it anyway. Counting the raw set made "%d down, %d skipped"
+-- add up to MORE than the number of bosses in the instance -- the same
+-- double-count CountRemaining is written the way it is to avoid, arrived at
+-- from the other direction. It is also the more useful number: `dead` wins on
+-- screen (/nav list prints one that is both as "(down)"), and /nav reset can
+-- only really bring back a skip that is not also a corpse.
+local function CountSkipped()
+    local n = 0
+    for _, b in ipairs(bosses) do
+        if skipped[b] and not dead[b] then n = n + 1 end
+    end
+    return n
+end
+
+-- (!) COUNT IT, DO NOT SUBTRACT IT. A boss can be BOTH skipped and dead (skip
+-- one, the bots kill it anyway), so #bosses - dead - skipped double-counts and
+-- can go negative -- and this number is printed to the player as "N left".
+-- With CountSkipped above excluding the dead, these three now partition the
+-- instance exactly: CountDead + CountSkipped + CountRemaining == #bosses.
+local function CountRemaining()
+    local n = 0
+    for _, b in ipairs(bosses) do
+        if not dead[b] and not skipped[b] then n = n + 1 end
+    end
+    return n
+end
+
 local function NextBoss()
     for _, b in ipairs(bosses) do
-        if not dead[b] then return b end
+        if not dead[b] and not skipped[b] then return b end
     end
     return nil
 end
@@ -310,7 +442,16 @@ local function AutoRoute()
         -- so an unguarded message here reprints itself forever.
         if not saidAllDone then
             saidAllDone = true
-            Say("every routable boss here is down.")
+            local ns = CountSkipped()
+            if ns > 0 then
+                -- Say WHY there is nothing left when part of it was the player's
+                -- own doing, and name the way back. "Everything is down" over a
+                -- boss they deliberately walked past reads as a lost kill.
+                Say(string.format("nothing left to route to -- %d down, %d skipped. /nav reset brings the skipped ones back.",
+                    CountDead(), ns))
+            else
+                Say("every routable boss here is down.")
+            end
         end
     end
 end
@@ -352,7 +493,16 @@ local function SetMap(id)
     mapId = id
     bosses = (NorgNavBosses or {})[id] or {}
     dead = {}
+    -- (!) THE ONLY PLACE A SKIP IS CLEARED (bar an explicit /nav reset). A skip
+    -- is a decision about THIS run of THIS instance, so it has to outlive every
+    -- alive poll and survive right up to the point the player leaves.
+    skipped = {}
     target = nil
+    -- Nothing the old map's server subscription might still report can belong to
+    -- a boss on this one.
+    startQ = {}
+    subscribed = nil
+    ackLost = false
     saidAllDone = false
 
     -- Spawn id -> the entries using it, so an A| reply can mark the right ones
@@ -401,6 +551,25 @@ local function OnAddonMessage(msg)
         -- screen is a stale packet from the route it replaced. Letting it set
         -- haveFix would repaint an arrow over guidance that says there is none.
         if target and target.nr then return end
+        -- (!) A P| CARRIES NO ID EITHER, so the same attribution problem S|dead
+        -- has applies here -- and the answer is the same acknowledgement.
+        --
+        -- A START the server has not acknowledged is one it has not installed,
+        -- so it is still streaming whatever it was routing to before: the reply
+        -- is written by the same handler that installs the target, and the
+        -- session's packets are ordered. A P| arriving now is therefore not
+        -- about the boss whose name is on screen. Painting it anyway put the
+        -- PREVIOUS boss's distance and routing status under the NEW boss's name
+        -- after an auto-advance -- a confident number about a different boss.
+        --
+        -- (!) THAT REASONING COVERS A START THE SERVER RECEIVED. One swallowed
+        -- on the way is never acknowledged at all, so the queue does not drain
+        -- on its own and the stream would stay dark for good; the age timeout in
+        -- OnUpdate is what ends that. So the blackout is bounded, but not by a
+        -- flat ACK_TIMEOUT: ages only advance while frames are drawn, and every
+        -- further START queued meanwhile pushes the drain out. The worst case is
+        -- ACK_TIMEOUT of drawn time after the LAST unanswered START.
+        if #startQ > 0 then return end
         px, py = tonumber(a) or 0, tonumber(b) or 0
         wx, wy = tonumber(c) or 0, tonumber(d) or 0
         routeYd, lineYd = tonumber(e) or 0, tonumber(f) or 0
@@ -466,26 +635,78 @@ local function OnAddonMessage(msg)
         if not state then return end
 
         if state == "dead" then
-            -- (!) An nr=1 entry never had a subscription, so a kill report can
-            -- only belong to the route it replaced. Crediting it here would mark
-            -- the WRONG boss down; the 20-second ALIVE poll catches the real one.
-            if target and target.nr then return end
-            if target then
-                dead[target] = true
-                Say(target.n .. " is down.")
+            -- (!) CREDIT THE BOSS THE SERVER WAS WATCHING, NOT THE ONE ON SCREEN.
+            --
+            -- This used to mark `target` down, which is wrong on any kill we
+            -- advanced past ourselves first. The combat log advances us the
+            -- instant the boss dies; the server notices on its next world update
+            -- and reports on the next nav cadence (NAV_INTERVAL_MS,
+            -- norg_nav.cpp), by which time `target` is the NEXT boss.
+            --
+            -- (!) NOTHING HERE COUNTS HOW OFTEN THAT ORDERING WINS, so do not
+            -- write a frequency into this comment -- two earlier versions did
+            -- and both were wrong. The ordering is what matters: when the report
+            -- loses the race, the mark lands on the wrong boss.
+            --
+            -- It was also unrepairable: the falsely marked boss is across the
+            -- instance and unloaded, so the 20-second alive poll gets '?' back
+            -- and clears nothing. Reproduced in Wailing Caverns -- kill Verdan,
+            -- and the addon announces Mutanus down, then "every routable boss
+            -- here is down" with the final fight still ahead.
+            --
+            -- `subscribed` is the last START the server ACKNOWLEDGED, so it is
+            -- exactly what the server was death-checking when it sent this.
+            local b = subscribed
+            subscribed = nil              -- the server drops the subscription with this
+            if not b then
+                -- Nothing acknowledged to attribute this to: an nr=1 entry (which
+                -- never had a subscription of its own), or a lost acknowledgement.
+                -- Marking SOMETHING would be a guess, and a wrong mark is what
+                -- this whole block exists to prevent -- so ASK instead. The A|
+                -- reply names every boss the server can see is dead, and the one
+                -- that just died is by definition loaded.
+                AskAlive()
+                aliveRetry = 2.0
+                return
+            end
+
+            if not dead[b] then
+                dead[b] = true
+                Say(b.n .. " is down. |cff808080(" .. CountRemaining() .. " left)|r")
+            end
+            -- Only the boss ON SCREEN finishing needs the panel dealt with. When
+            -- the report is for one we already walked away from, the live route
+            -- must be left strictly alone.
+            if target == b then
                 TargetFinished()
-            else
+            elseif not target then
                 AutoRoute()
             end
         elseif state == "leftmap" then
             target = nil
             haveFix = false
+            subscribed = nil
             if frame then frame:Hide() end
         elseif state == "started" then
             -- The acknowledgement of our OWN START. The subscription we just
             -- asked for is live, so there is nothing to undo here -- clearing
             -- would cancel every route the instant it began.
+            --
+            -- It is also the ONLY moment we learn that the server has moved on to
+            -- the next boss, which is what keeps S|dead attributable. FIFO
+            -- because the server installs targets in the order it receives them.
+            --
+            -- (!) The pop can come back nil -- the age timeout may have already
+            -- retired this entry, or a stale reply may outlive a map change.
+            -- Leaving `subscribed` nil there is the safe answer: the next
+            -- S|dead asks the server rather than crediting a guess.
+            local q = table.remove(startQ, 1)
+            subscribed = q and q.b
+            ackLost = false   -- the channel is working again, so warn again if it stops
         elseif state == "stopped" then
+            -- The server erased the target slot, so it is watching nothing on our
+            -- behalf and any later S|dead cannot be ours to credit.
+            subscribed = nil
             -- Either the echo of a STOP we sent -- target is already nil by then,
             -- so this does nothing -- or NorgQuest taking the slot from under us.
             --
@@ -506,6 +727,12 @@ local function OnAddonMessage(msg)
         else
             -- "badargs", or any word a later module adds. Nothing is streaming
             -- whatever the word meant, so an arrow left up is frozen.
+            --
+            -- badargs is the OTHER possible reply to a START, so it has to
+            -- consume the same queue slot S|started would have -- but only that
+            -- one word, because a future word is not a START reply and popping
+            -- for it would put every later acknowledgement one boss out of step.
+            if state == "badargs" then table.remove(startQ, 1) end
             if target then
                 target = nil
                 haveFix = false
@@ -578,7 +805,8 @@ ev:SetScript("OnEvent", function(_, event, ...)
             frame:ClearAllPoints()
             frame:SetPoint(p, UIParent, rp, x, y)
         end
-        Say("loaded. Routes automatically in dungeons. /nav next to skip, /nav off, /nav help.")
+        Say("v" .. VERSION ..
+            " loaded. Routes automatically in dungeons. /nav next to skip, /nav off, /nav help.")
         whereRetry = 2.0
         return
     end
@@ -619,7 +847,7 @@ ev:SetScript("OnEvent", function(_, event, ...)
                         -- rather than sit on a dead boss's name and a stale count.
                         TargetFinished()
                     else
-                        Say(b.n .. " is down. |cff808080(" .. #bosses - CountDead() ..
+                        Say(b.n .. " is down. |cff808080(" .. CountRemaining() ..
                             " left)|r")
                     end
                     break
@@ -676,6 +904,50 @@ ev:SetScript("OnUpdate", function(_, elapsed)
         end
     end
 
+    -- (!) RETIRE A START THAT WAS NEVER ANSWERED, OR ONE LOST REPLY MIS-CREDITS
+    -- EVERY KILL FOR THE REST OF THE SESSION.
+    --
+    -- The reply is written by the same handler that reads the whisper, so the
+    -- only way one never arrives is that the whisper never got there --
+    -- ChatHandler.cpp drops the line at !CanSpeak() and on the GM silence aura
+    -- before mod-norg-nav is called at all. Nothing then retires that queue
+    -- entry, so it stays at the head for ever and every later acknowledgement
+    -- pops the WRONG boss: S|dead credits the previous entry from then on, with
+    -- nothing on screen to say so. The depth guard in StartNav cannot see it --
+    -- one lost reply keeps the queue oscillating between one and two.
+    --
+    -- Ages only advance while frames are drawn, so a loading screen does not
+    -- age anything out, and the front entry is always the oldest, so the drain
+    -- can stop at the first live one. Dropping `subscribed` alongside it is the
+    -- point: we no longer know what the server is watching, and an S|dead we
+    -- cannot attribute must ASK (a missed death is repaired by the alive poll;
+    -- a mis-credited one is not).
+    if startQ[1] then
+        for _, q in ipairs(startQ) do q.age = q.age + elapsed end
+        local expired = false
+        while startQ[1] and startQ[1].age >= ACK_TIMEOUT do
+            table.remove(startQ, 1)
+            expired = true
+        end
+        if expired then
+            subscribed = nil
+            AskAlive()
+            aliveRetry = 2.0
+            -- Once per episode, and only while something is actually on screen
+            -- to be stale. A mute swallows every whisper this addon sends, so a
+            -- line per route would be a wall of text about one problem -- but
+            -- silence here is worse, because a stale arrow that never updates is
+            -- indistinguishable from one simply pointing at a boss a long way
+            -- off. With no target the panel is already down and, if NorgQuest
+            -- took the slot, already explained, so a second line about a route
+            -- nobody can see would only confuse.
+            if target and not ackLost then
+                ackLost = true
+                Say("the server did not answer the last route request -- the arrow may be stale. /nav to retry.")
+            end
+        end
+    end
+
     if not target or not haveFix then return end
     acc = acc + elapsed
     if acc < 0.05 then return end
@@ -685,6 +957,36 @@ end)
 
 -- -------------------------------------------------------------------- command
 
+--- (!) A COMMAND THAT ANSWERS WITH SILENCE READS AS A BROKEN ADDON.
+---
+--- AutoRoute is deliberately quiet whenever it has nothing to change, and the
+--- all-clear is deliberately said ONCE per instance -- so once everything was
+--- marked down, /nav printed absolutely nothing, every time, forever. That was
+--- reported as "typing /nav does nothing at all" after a mis-credited kill, and
+--- the silence is what made it impossible to tell a broken addon from a cleared
+--- instance. Returns true when it has explained why there is nothing to route
+--- to, and pre-arms saidAllDone so AutoRoute does not then repeat itself.
+local function SayNothingToRoute()
+    if #bosses == 0 then
+        Say("no boss coordinates for this instance.")
+        return true
+    end
+    if NextBoss() then
+        return false
+    end
+
+    saidAllDone = true
+    local ns = CountSkipped()
+    if ns > 0 then
+        Say(string.format("every boss here is accounted for -- %d down, %d skipped. /nav reset brings the skipped ones back.",
+            CountDead(), ns))
+    else
+        Say(string.format("every boss here is already marked down (%d of %d). /nav reset if that looks wrong.",
+            CountDead(), #bosses))
+    end
+    return true
+end
+
 SLASH_NORGNAV1 = "/nav"
 SlashCmdList["NORGNAV"] = function(arg)
     arg = arg and arg:lower():gsub("^%s+", ""):gsub("%s+$", "") or ""
@@ -693,7 +995,8 @@ SlashCmdList["NORGNAV"] = function(arg)
         Say("/nav -- resume automatic routing in encounter order")
         Say("/nav next -- skip the current boss (behind a door, or you want another)")
         Say("/nav <name> -- route to one boss and stay on it")
-        Say("/nav list -- what is here and what is already down")
+        Say("/nav list -- what is here, what is down, and what you skipped")
+        Say("/nav reset -- forget every down/skipped mark and re-check with the server")
         Say("/nav off -- stop; /nav debug -- show what the server is sending")
         return
     end
@@ -706,17 +1009,86 @@ SlashCmdList["NORGNAV"] = function(arg)
 
     if arg == "" or arg == "auto" or arg == "on" then
         autoMode = true
-        if not mapId then Send("WHERE") else AskAlive(); AutoRoute() end
+        if not mapId then
+            -- Before the first M| this is the whole truth, and it is a great deal
+            -- more useful than nothing: the server answers within a second or two
+            -- and the arrow appears on its own.
+            Send("WHERE")
+            Say("asking the server which instance this is...")
+            return
+        end
+
+        AskAlive()
+        if not SayNothingToRoute() and target == NextBoss() then
+            -- AutoRoute says nothing when it is already on the right boss, and
+            -- "/nav did nothing" is exactly how that reads.
+            Say("already routing to " .. target.n .. ".")
+        end
+        AutoRoute()
+        return
+    end
+
+    if arg == "reset" then
+        -- The way back from any wrong mark: a skip the player has changed their
+        -- mind about, or a death this addon or the server got wrong. Clears our
+        -- own bookkeeping and then asks the server for the truth rather than
+        -- assuming everything is alive -- the A| reply re-marks whatever really
+        -- is down, so a reset in a half-cleared instance does not send anyone
+        -- back to a corpse.
+        dead = {}
+        skipped = {}
+        saidAllDone = false
+        autoMode = true
+        -- (!) DROP THE CURRENT TARGET TOO. Once every mark is cleared NextBoss
+        -- always returns the FIRST entry in the instance, and AutoRoute only
+        -- acts when the boss it picks differs from the one being routed to -- so
+        -- if the arrow was already on that first entry it would leave the run
+        -- exactly as it found it. Clearing `target` makes it re-request the
+        -- route and name it, so the command re-routes visibly instead of only
+        -- printing a line about marks the player cannot see.
+        --
+        -- (!) NO STOP IS SENT, and `subscribed` is deliberately left alone: the
+        -- server really is still watching that boss, so an S|dead landing in
+        -- between is credited correctly, and correctly re-marks a boss this
+        -- command has just cleared the death mark from.
+        --
+        -- The server keeps ONE target slot per player, and the AutoRoute below
+        -- USUALLY takes it over by STARTing the next boss. Not always: it sends
+        -- nothing at all when the instance has no entries, and an nr=1 next
+        -- entry sends no START either -- ShowUnroutable only sends STOP when a
+        -- target is set, and this command has just cleared it. In those two
+        -- cases the old subscription keeps streaming until something else takes
+        -- the slot or the player leaves the map.
+        target = nil
+        haveFix = false
+        Say("cleared every down and skipped mark here; re-checking with the server.")
+        if AskAlive() then
+            aliveRetry = 2.0
+        end
+        -- Route now rather than waiting for the reply. SetMap waits on purpose --
+        -- it is crossing an instance -- but this is a standing player who just
+        -- asked for something to happen, and the worst case is one "next --"
+        -- line being corrected a third of a second later.
+        SayNothingToRoute()   -- only reachable here when the instance has no data
+        AutoRoute()
         return
     end
 
     if arg == "next" or arg == "skip" then
-        if target then
-            dead[target] = true        -- treat as done for this run, without killing it
-            Say("skipping " .. target.n .. ".")
-            target = nil
-        end
         autoMode = true
+        if target then
+            -- (!) SKIPPED, NOT DEAD. Both facts lived in `dead` once, and the
+            -- alive poll is allowed to clear a death mark -- it has to be, or a
+            -- boss that evaded stays skipped for the run -- so it un-skipped
+            -- this one and dragged the player straight back to it, anywhere
+            -- between instantly and twenty seconds later.
+            skipped[target] = true
+            Say("skipping " .. target.n .. " for this run. /nav reset brings it back.")
+            target = nil
+        else
+            Say("nothing is being routed, so there is nothing to skip.")
+        end
+        SayNothingToRoute()
         AutoRoute()
         return
     end
@@ -724,9 +1096,13 @@ SlashCmdList["NORGNAV"] = function(arg)
     if arg == "list" then
         if #bosses == 0 then Say("nothing routable here.") return end
         for _, b in ipairs(bosses) do
-            Say(string.format("  %d. %s%s%s", b.i, b.n,
+            -- Down and skipped are shown separately on purpose: "skipped" is the
+            -- player's own decision and the only one /nav reset can undo, so
+            -- printing both as (down) hid the one fact they could act on.
+            Say(string.format("  %d. %s%s%s%s", b.i, b.n,
                 b.ap and "  |cffffd100(event start)|r" or "",
-                dead[b] and "  |cff808080(down)|r" or ""))
+                dead[b] and "  |cff808080(down)|r" or "",
+                (skipped[b] and not dead[b]) and "  |cff808080(skipped)|r" or ""))
         end
         return
     end
@@ -734,6 +1110,18 @@ SlashCmdList["NORGNAV"] = function(arg)
     if arg == "debug" then
         Say(string.format("map=%s bosses=%d status=%s fix=%s",
             tostring(mapId), #bosses, lastStatus, tostring(haveFix)))
+        -- (!) PRINT WHAT THE SERVER IS WATCHING ALONGSIDE WHAT IS ON SCREEN.
+        -- The two differing is normal for a moment after every kill, and a kill
+        -- report is credited to the SERVER's one -- so when a boss is marked
+        -- down that should not be, this line is the only place the discrepancy
+        -- is visible at all.
+        -- `awaiting` is the other half of it: a number that will not come back
+        -- down is a reply that is never coming, which is the one failure that
+        -- used to poison every later kill silently.
+        Say(string.format("  on screen=%s  server is watching=%s  awaiting=%d  down=%d skipped=%d",
+            target and target.n or "nothing",
+            subscribed and subscribed.n or "nothing",
+            #startQ, CountDead(), CountSkipped()))
         if haveFix then
             -- Cardinal direction is computed from world coordinates alone, with no
             -- facing involved, so it is a check on the COORDINATE convention that

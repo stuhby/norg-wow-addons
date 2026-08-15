@@ -1,7 +1,7 @@
 -- Stub harness for NorgOneBag: loads the REAL addon file against a fake WoW API
 -- and checks the layout maths, button plumbing and event wiring.
 -- Cannot test rendering; it CAN catch nil-indexing, bad arithmetic and wrong
--- parent/ID wiring, which are the failure modes that would break in-game.
+-- parent/ID wiring, each of which would break the frame in-game.
 
 local created, points, shown = {}, {}, {}
 local BAGSLOTS = { [0]=16, [1]=16, [2]=12, [3]=0, [4]=0 }   -- backpack + two bags
@@ -48,7 +48,7 @@ _G.CreateFrame = newFrame
 _G.UIParent = newFrame("Frame","UIParent")
 _G.UISpecialFrames = {}
 _G.tinsert = table.insert
-_G.DEFAULT_CHAT_FRAME = { AddMessage=function() end }
+_G.DEFAULT_CHAT_FRAME = { msgs={}, AddMessage=function(s,m) table.insert(s.msgs,m) end }
 _G.MoneyFrame_SetType = function() end
 _G.SetItemButtonTexture = function() end
 _G.SetItemButtonCount = function() end
@@ -59,7 +59,33 @@ _G.GetContainerItemInfo = function() return "tex", 5, nil, 1, nil end
 _G.SLASH_NORGONEBAG1 = nil
 _G.SlashCmdList = {}
 
-dofile("/data/NorgOneBag.lua")
+-- (!) THE RULE: EVERY dofile PATH IS ADDON-QUALIFIED, "/data/<AddOn>/<file>.lua".
+-- Every suite in this project is run from the addon ROOT with -v "$PWD:/data", so
+-- /data IS that root and an addon's own files only exist one folder down. An
+-- unqualified "/data/NorgOneBag.lua" resolves ONLY when this single addon folder is
+-- mounted on its own -- which passes in isolation and then dies as a BROKEN TEST
+-- in a run-everything loop, so the suite quietly ships unverified. The rule holds
+-- for every suite here and for any new one; never drop the folder segment, and do
+-- not restate it as a count of how many suites currently comply.
+-- (!) GetAddOnMetadata IS REAL IN 3.3.5a -- Atlas 3.x calls it at file scope to
+-- set ATLAS_VERSION (atlas-src/Atlas-3/Atlas/Atlas.lua) -- but plain Lua has no
+-- such global, so without this stub the addon's version line is a nil call the
+-- moment it loads.
+-- It READS THE ACTUAL .toc rather than returning a literal: a hardcoded answer
+-- would keep passing for ever while the addon printed something else, which is
+-- the exact drift the version line exists to stop.
+_G.GetAddOnMetadata = function(folder, field)
+    if field ~= "Version" then return nil end
+    local f = io.open("/data/" .. folder .. "/" .. folder .. ".toc")
+    if not f then return nil end
+    local v
+    for line in f:lines() do v = v or line:match("^##%s*Version:%s*(.-)%s*$") end
+    f:close()
+    return v
+end
+local TOC_VERSION = _G.GetAddOnMetadata("NorgOneBag", "Version")
+
+dofile("/data/NorgOneBag/NorgOneBag.lua")
 
 local pass, fail = 0, 0
 local function check(name, cond, detail)
@@ -74,6 +100,11 @@ for _,f in ipairs(created) do
 end
 check("registered BAG_UPDATE handler", ev ~= nil)
 ev._scripts["OnEvent"](ev, "PLAYER_LOGIN")
+
+check("login banner names the version FROM THE .toc",
+      TOC_VERSION and DEFAULT_CHAT_FRAME.msgs[1]
+      and DEFAULT_CHAT_FRAME.msgs[1]:find("v"..TOC_VERSION, 1, true), DEFAULT_CHAT_FRAME.msgs[1])
+check("and announces itself exactly ONCE", #DEFAULT_CHAT_FRAME.msgs == 1, #DEFAULT_CHAT_FRAME.msgs)
 
 check("main frame created", _G.NorgOneBagFrame ~= nil)
 check("Escape-close registered", #_G.UISpecialFrames == 1 and _G.UISpecialFrames[1]=="NorgOneBagFrame")

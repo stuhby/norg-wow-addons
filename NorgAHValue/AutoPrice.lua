@@ -3,12 +3,27 @@
 -- the copy on the server, and nothing in game could tell them apart. A version
 -- in the chat frame at login makes "is my copy current?" answerable in one
 -- second instead of by arithmetic archaeology on auction prices.
-NORGAHVALUE_VERSION = "1.5"
+--
+-- (!) AND IT IS READ FROM THE .toc, NEVER COPIED INTO A CONSTANT HERE. A second
+-- copy of the number drifts from the .toc in silence, and a login line that lies
+-- is worse than no login line at all, because the wiki's troubleshooting page
+-- tells you to trust it.
+-- "?" means the client never indexed this folder, which is itself the answer to
+-- "why is nothing happening".
+local ADDON = "NorgAHValue"      -- FOLDER name; GetAddOnMetadata keys on that
+NORGAHVALUE_VERSION = GetAddOnMetadata(ADDON, "Version") or "?"
 local vf = CreateFrame("Frame")
 vf:RegisterEvent("PLAYER_LOGIN")
 vf:SetScript("OnEvent", function()
+    -- (!) ONE LINE PER ADDON. The item count used to be a SECOND "loaded" line,
+    -- printed from NorgAHValue.lua's ADDON_LOADED handler; the operator loads
+    -- eight of these, so two lines each is login spam. The count is worth
+    -- keeping -- it is the only proof DataSell.lua actually loaded -- so it
+    -- rides along here and that branch is gone.
+    local n = 0
+    if NorgAHValue_Sell then for _ in pairs(NorgAHValue_Sell) do n = n + 1 end end
     DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00NorgAHValue|r v" .. NORGAHVALUE_VERSION ..
-        " loaded -- prices the sell slot at the bot s maximum. /ahprice to re-price.")
+        " loaded -- " .. n .. " items priced. /ahprice to re-price the sell slot.")
 end)
 
 --[[----------------------------------------------------------------------------

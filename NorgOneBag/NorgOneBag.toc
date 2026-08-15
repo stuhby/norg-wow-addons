@@ -2,7 +2,7 @@
 ## Title: Norg One Bag
 ## Notes: Combines all bags into a single window using the stock 3.3.5a look.
 ## Author: Norg
-## Version: 1.0
+## Version: 1.1
 ## SavedVariables: NorgOneBagDB
 
 NorgOneBag.lua

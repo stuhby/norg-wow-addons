@@ -68,6 +68,24 @@ _G.GetQuestLink = function(i)
     return string.format("|cff808080|Hquest:%d:10|h[%s]|h|r", e.id, e.title)
 end
 
+-- (!) GetAddOnMetadata IS REAL IN 3.3.5a -- Atlas 3.x calls it at file scope, see
+-- ATLAS_VERSION in atlas-src/Atlas-3/Atlas/Atlas.lua -- but plain Lua has no such
+-- global, so without this stub the addon's version line is a nil call the moment
+-- it loads.
+-- It READS THE ACTUAL .toc rather than returning a literal: a hardcoded answer
+-- would keep passing for ever while the addon printed something else, which is
+-- the exact drift the version line exists to stop.
+_G.GetAddOnMetadata = function(folder, field)
+    if field ~= "Version" then return nil end
+    local f = io.open("/data/" .. folder .. "/" .. folder .. ".toc")
+    if not f then return nil end
+    local v
+    for line in f:lines() do v = v or line:match("^##%s*Version:%s*(.-)%s*$") end
+    f:close()
+    return v
+end
+local TOC_VERSION = _G.GetAddOnMetadata("NorgQuest", "Version")
+
 dofile("/data/NorgQuest/NorgQuest.lua")
 
 local pass, fail = 0, 0
@@ -101,8 +119,17 @@ local function sentMatching(p)
     for i = #sent, 1, -1 do if sent[i]:find(p) then return sent[i] end end
 end
 
+-- Same shape as sentMatching, over the chat sink. Plain find (4th arg true) so a
+-- message containing Lua pattern magic cannot silently fail to match.
+local function chatMatching(p)
+    for i = #chat, 1, -1 do if chat[i]:find(p, 1, true) then return chat[i] end end
+end
+
 fire("PLAYER_LOGIN")
 check("built its frame", _G.NorgQuestFrame ~= nil)
+check("login banner names the version FROM THE .toc",
+      TOC_VERSION and chat[1] and chat[1]:find("v" .. TOC_VERSION, 1, true), chat[1])
+check("and announces itself exactly ONCE", #chat == 1, #chat)
 
 -- ========================================================= scan is coalesced
 -- (!) QUEST_LOG_UPDATE fires in bursts -- several times for one turn-in, and
@@ -162,12 +189,15 @@ check("drops a quest the server cannot resolve and moves on",
 -- owns the open world; without this the two would fight over the same target and
 -- whichever spoke last would win, leaving the other displaying a stale name.
 _G.__inInstance = true
-sent = {}
+-- (!) CLEAR `chat` TOO, not just `sent`. It was last cleared before the login
+-- banner, so a bare `#chat > 0` below was satisfied by the banner and passed even
+-- with this branch's only Say() deleted.
+sent = {}; chat = {}
 SlashCmdList["NORGQUEST"]("")
 check("does not auto-track inside an instance",
       sentMatching("^NORGQUEST GO ") == nil, tostring(lastSent()))
 check("says why rather than failing silently",
-      #chat > 0)
+      chatMatching("NorgNav has the arrow") ~= nil, chat[#chat])
 _G.__inInstance = false
 
 -- ==================================================================== commands
@@ -325,6 +355,114 @@ nav("P|0.00|0.00|0.00|30.00|412|282|ok")
 tick(0.2)
 check("stale target name is cleared on a new pick",
       panelText():find("Sputtervalve") == nil, panelText())
+
+-- ======================================= an areatrigger objective has nobody in it
+-- (!) "Go to this place" objectives were captioned with a RANDOM NPC. The server
+-- indexes areatrigger centres BY QUEST ID and the resolver copied that id into the
+-- field a creature ENTRY belongs in, so the name lookup ran against
+-- creature_template with a quest id: quest 62 (The Fargodeep Mine) rendered as
+-- "talk to Gug Fatcandle", 437 (The Dead Fields) as "Blackrock Renegade", 870 (The
+-- Forgotten Pools) as "Protector Deni". 38 of the 61 areatrigger quests on this
+-- world collide with a creature entry that way. Kind 'a' now means "a place".
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+quest("Q|62:a:-9500:-1100:300:1")
+quest("E|1")
+quest("G|62|a|")
+nav("P|0.00|0.00|0.00|30.00|412|282|ok")
+tick(0.2)
+check("an areatrigger objective reads as an explore instruction",
+      panelText():find("explore") ~= nil, panelText())
+check("...and never invents somebody to talk to",
+      panelText():find("talk to") == nil, panelText())
+
+-- (!) SECOND LOCK. Even handed a name for an 'a' target -- an older server, or a
+-- future index that fills the entry in again -- the panel must refuse to print it,
+-- because a confidently wrong instruction sends the player hunting for an NPC.
+quest("G|62|a|Gug Fatcandle")
+nav("P|0.00|0.00|0.00|30.00|412|282|ok")
+tick(0.2)
+check("refuses a name sent for a place",
+      panelText():find("Gug Fatcandle") == nil, panelText())
+
+-- ============================================ an escort NPC walks; follow him
+-- (!) ESCORT QUESTS POINTED BACKWARDS. The server read the static spawn row, so
+-- the arrow aimed at where the NPC had been standing before he set off. It now
+-- reports his live position, but that is only half the fix: the 250-yard commit
+-- below was written for interchangeable spawn clusters and would hold the stale
+-- answer for most of the escort. An 'e' objective is usually one named NPC rather
+-- than a crowd of interchangeable ones, so a shorter commit re-routes to where he
+-- has walked instead of swinging between neighbours.
+--
+-- (!) THIS OBJECTIVE LIST HAS TWO ENTRIES ON PURPOSE AND THE SECOND ONE IS THE
+-- WHOLE TEST. With a single objective in the list, "re-route to the same quest"
+-- and "re-run the pick from scratch" are the same instruction, so a one-entry
+-- list cannot tell a working addon from one that abandons the escort -- which is
+-- exactly why the first version of this test passed against the bug. A kill
+-- objective 5 yards away is not decisively better than an escort 15 yards away
+-- (see SWITCH_RATIO), so it must NOT win.
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+quest("Q|1144:e:100:100:15:1")     -- Willix the Importer, at his spawn
+quest("E|1")
+sent = {}
+quest("Q|1144:e:200:100:15:1|2002:k:50:50:5:1")   -- 100 yd along his path
+quest("E|2")
+check("re-routes to the SAME escort when the NPC walks away",
+      sentMatching("^NORGQUEST GO ") == "NORGQUEST GO 1144", tostring(lastSent()))
+
+-- ...and the walk must not stop happening. A second step forward has to keep
+-- producing a fresh route, or the fix would be "hold the first answer for ever",
+-- which is the backwards arrow again.
+sent = {}
+quest("Q|1144:e:300:100:15:1|2002:k:50:50:5:1")
+quest("E|2")
+check("keeps following him on the next step",
+      sentMatching("^NORGQUEST GO ") == "NORGQUEST GO 1144", tostring(lastSent()))
+
+-- (!) BUT A GENUINE JUMP MUST STILL RE-PICK. If a moved objective always kept
+-- the arrow, the escape hatch that fixed "standing beside Deathguard Podrig
+-- while the arrow insists on 1,673 yards away" would be gone. Here the escort is
+-- 1,600 yards off and a kill objective is at the player's feet: decisively
+-- better on BOTH tests, so it wins even though the tracked objective also moved.
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+quest("Q|1144:e:100:100:1600:1")
+quest("E|1")
+sent = {}
+quest("Q|1144:e:200:100:1600:1|2003:k:50:50:5:1")
+quest("E|2")
+check("a decisively better objective still steals a MOVED escort",
+      sentMatching("^NORGQUEST GO ") == "NORGQUEST GO 2003", tostring(lastSent()))
+
+-- ...while a kill objective must STILL commit, or the arrow goes back to swinging
+-- between neighbouring spawns of the same mob as you walk.
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+quest("Q|1145:k:100:100:30:1")
+quest("E|1")
+sent = {}
+quest("Q|1145:k:200:100:60:1")
+quest("E|1")
+check("still commits to a spawn cluster for a kill objective",
+      sentMatching("^NORGQUEST GO ") == nil, tostring(lastSent()))
+
+-- ============================ the arrow moves on when the escort is COMPLETE
+-- (!) THIS PINS A DECISION, NOT A BUG. When the escort finishes, the objective
+-- kind flips 'e' -> 't' and the pick re-runs from scratch, so a nearer objective
+-- takes the arrow even though the turn-in NPC is right there. AutoTrack explains
+-- why that is wanted: a completed escort cannot be failed by walking off, and a
+-- turn-in you can see is the one thing a player does not need an arrow for.
+-- Anyone who changes this has to change that comment too.
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+quest("Q|1144:e:100:100:15:1")
+quest("E|1")
+sent = {}
+quest("Q|1144:t:100:100:15:1|2006:k:50:50:5:1")
+quest("E|2")
+check("hands the arrow on once a completed escort becomes a turn-in",
+      sentMatching("^NORGQUEST GO ") == "NORGQUEST GO 2006", tostring(lastSent()))
 -- =================================================================== garbage
 local ok = pcall(function()
     quest("Q|")

@@ -3,7 +3,7 @@
 -- Loads the REAL addon against a fake 3.3.5a API and drives the whole server
 -- conversation through the same buttons and slash commands a player uses.
 --
--- (!) WHAT THIS IS ACTUALLY GUARDING. Two things in this addon are wrong in a
+-- (!) WHAT THIS IS ACTUALLY GUARDING. Three things in this addon are wrong in a
 -- way that produces no visible symptom until it costs somebody something:
 --
 --   1. SLOT vs ROW. Slots are reused after a delete, so a list can read 1, 3, 4
@@ -13,9 +13,15 @@
 --   2. STALE ROWS. When the list shrinks, a row that is merely hidden still
 --      carries the slot it last held. Show it again for a different bind and it
 --      fires the old one.
+--   3. A STALE PANEL. Which bind is live lives on the SERVER, and no event this
+--      addon registers fires when you bind at an innkeeper. A window left open
+--      while you walk over and bind therefore keeps drawing the green arrow beside
+--      your PREVIOUS bind -- correct-looking, and wrong about the one thing
+--      this addon exists to tell you.
 --
--- Neither is visible in a screenshot, so both are asserted here by clicking the
--- REAL button object the addon built and reading what it actually sent.
+-- None of the three is visible in a screenshot, so they are asserted here by
+-- clicking the REAL button object the addon built, driving its REAL OnUpdate,
+-- and reading what it actually sent.
 
 local sent, chat = {}, {}
 local frames, byName = {}, {}
@@ -108,6 +114,28 @@ _G.GameTooltip = { SetOwner = function() end, AddLine = function() end,
                    Show = function() end, Hide = function() end }
 
 local ADDON = os.getenv("NORGHEARTH_PATH") or "/data/NorgHearth/NorgHearth.lua"
+
+-- (!) GetAddOnMetadata IS REAL IN 3.3.5a -- the vendored Atlas 3.x calls it at
+-- file scope to set ATLAS_VERSION (atlas-src/Atlas-3/Atlas/Atlas.lua) -- but
+-- plain Lua has no such global, so without this stub the addon's version line
+-- is a nil call the moment it loads.
+--
+-- (!) IT READS THE ACTUAL .toc RATHER THAN RETURNING A LITERAL. A hardcoded "1.0"
+-- here would keep passing for ever while the addon printed something else, which
+-- is the exact drift this whole change exists to stop -- the test would then be
+-- asserting nothing but its own opinion.
+local TOC = ADDON:gsub("%.lua$", ".toc")
+_G.GetAddOnMetadata = function(_, field)
+    if field ~= "Version" then return nil end
+    local f = io.open(TOC)
+    if not f then return nil end
+    local v
+    for line in f:lines() do v = v or line:match("^##%s*Version:%s*(.-)%s*$") end
+    f:close()
+    return v
+end
+local TOC_VERSION = _G.GetAddOnMetadata("NorgHearth", "Version")
+
 dofile(ADDON)
 
 -- ------------------------------------------------------------------- assertions
@@ -139,8 +167,11 @@ local function click(b) b._scripts["OnClick"](b) end
 fire("PLAYER_LOGIN")
 check("built its window", byName["NorgHearthFrame"] ~= nil)
 check("built 8 row buttons", row(1) ~= nil and row(8) ~= nil and row(9) == nil)
-check("login banner names the version",
-      chatMatching("v1.0") ~= nil, lastChat())
+check("the .toc carries a Version field at all", TOC_VERSION ~= nil, TOC_VERSION)
+check("login banner names the version FROM THE .toc",
+      TOC_VERSION and chatMatching("v" .. TOC_VERSION) ~= nil, lastChat())
+-- The operator loads eight of these; two lines each is login spam.
+check("and announces itself exactly ONCE", #chat == 1, #chat)
 check("window starts hidden", byName["NorgHearthFrame"]:IsShown() == false)
 check("rows start hidden", row(1):IsShown() == false)
 
@@ -211,38 +242,55 @@ sent = {}
 click(row(1))
 check("cleared rows are inert too", #sent == 0, tostring(lastSent()))
 
--- =========================================================== saving from the box
-local box  = byName["NorgHearthNameBox"]
-local save = byName["NorgHearthSaveButton"]
-sent = {}
-box:SetText("The Filthy Animal")
+-- ========================================== saving is one click, and no typing
+-- (!) ASSERT THE REPLACED WIDGETS ARE ABSENT, not merely that the live one works.
+-- An earlier cut shipped still building the pair the auto-naming replaced -- a
+-- dead hidden EditBox (NorgHearthName), a visible name box (NorgHearthNameBox)
+-- and a second Save button (NorgHearthSaveButton) -- sitting over the real
+-- button without stopping it working. Nothing MISBEHAVED, which is precisely
+-- why only an absence check keeps them gone.
+local save = byName["NorgHearthSave"]
+check("the window has a Save button", save ~= nil)
+check("no name box is built at all",
+      byName["NorgHearthName"] == nil and byName["NorgHearthNameBox"] == nil,
+      tostring(byName["NorgHearthName"]) .. " / " .. tostring(byName["NorgHearthNameBox"]))
+check("...and no second Save button drawn across the first",
+      byName["NorgHearthSaveButton"] == nil, tostring(byName["NorgHearthSaveButton"]))
+
+-- (!) THE BUTTON SENDS A BARE SAVE. The server derives the name from the area
+-- the homebind sits in, so the client must not invent or require one. If this
+-- ever starts sending a name again, the auto-naming is silently dead.
+sent = {}; chat = {}
 click(save)
-check("Save sends the typed name verbatim",
+check("Save sends a bare SAVE for the server to name",
+      lastSent() == "NORGHOME SAVE", tostring(lastSent()))
+check("...and does not scold the player about a missing name",
+      chatMatching("give it a name") == nil, tostring(lastChat()))
+
+-- A chosen name still travels -- through the slash command, the only route left.
+sent = {}
+slash("save The Filthy Animal")
+check("/hs save passes a chosen name through verbatim",
       lastSent() == "NORGHOME SAVE The Filthy Animal", lastSent())
-check("Save empties the box afterwards", box:GetText() == "", box:GetText())
 
 -- (!) "|" and ":" frame the messages both ways. They have to be gone BEFORE the
 -- line is sent, or the SAVE command itself is what breaks -- not merely the reply.
 sent = {}
-box:SetText("Dal|ar:an")
-click(save)
+slash("save Dal|ar:an")
 check("framing characters are stripped before sending",
       lastSent() == "NORGHOME SAVE Dalaran", lastSent())
 
-sent = {}; chat = {}
-box:SetText("   ")
-click(save)
 -- (!) CONTRACT REVERSED DELIBERATELY. A blank name used to be an error; it now
 -- means "name it after wherever I am bound", which the SERVER resolves from the
 -- area (an inn in Valley of Strength becomes Orgrimmar). Refusing it locally is
 -- what made the Save button send nothing at all.
+sent = {}; chat = {}
+slash("save    ")
 check("a blank name sends a bare SAVE for the server to name",
       lastSent() == "NORGHOME SAVE", tostring(lastSent()))
 check("...and does not scold the player about it",
       chatMatching("give it a name") == nil, lastChat())
 
--- The box caps length in the real client, so the over-length path is only
--- reachable from the slash command -- which is exactly why it is tested there.
 sent = {}; chat = {}
 slash("save " .. string.rep("x", 25))
 check("an over-long name is refused locally", #sent == 0, tostring(lastSent()))
@@ -254,8 +302,8 @@ slash("save " .. string.rep("x", 24))
 check("exactly 24 characters is allowed",
       lastSent() == "NORGHOME SAVE " .. string.rep("x", 24), lastSent())
 
--- (!) Every other Norg addon lower-cases its whole argument. This one must not:
--- the tail is a name the player chose.
+-- (!) The usual shape of a slash handler lower-cases the whole argument. This
+-- one must not: the tail is a name the player chose.
 sent = {}
 slash("SAVE Dalaran Inn")
 check("the verb is case-insensitive but the name keeps its case",
@@ -297,6 +345,113 @@ check("R removes the row locally", row(1):GetText():find("Dalaran Inn", 1, true)
 check("...without asking for the list again", #sent == 0, tostring(lastSent()))
 check("...and says what it forgot", chatMatching("Stormwind") ~= nil, lastChat())
 
+-- ============================== THE MARKER MUST BE CLEARED, NOT ONLY EVER SET
+-- (!) Bind at an inn you have NOT saved and the server answers correctly: every
+-- row flagged 0. An earlier cut only ever SET current -- it cleared it solely on
+-- the empty E|0 -- so the arrow and "(current)" stayed beside whichever bind was
+-- live LAST. The intended flow is the worst case for it: you bind, you open /hs
+-- to save the new place, and for exactly that window the panel points at your
+-- PREVIOUS bind. Being a session variable it was honest after a fresh login,
+-- which is how a feature whose only job is saying where the stone goes came to
+-- lie about it.
+chat = {}
+slash("list")
+msg("H|1:1519:1:Stormwind|2:4395:0:Dalaran Inn")
+msg("E|2")
+check("positive control: the server's flag does set the marker",
+      NorgHearth_Current() == 1
+      and row(1):GetText():find("cff40ff40", 1, true) ~= nil,
+      tostring(NorgHearth_Current()))
+
+chat = {}
+slash("list")
+msg("H|1:1519:0:Stormwind|2:4395:0:Dalaran Inn")
+msg("E|2")
+check("a list where no row is current clears the marker",
+      NorgHearth_Current() == nil, tostring(NorgHearth_Current()))
+check("...and no row is drawn with the arrow",
+      row(1):GetText():find("cff40ff40", 1, true) == nil
+      and row(2):GetText():find("cff40ff40", 1, true) == nil,
+      row(1):GetText() .. " / " .. row(2):GetText())
+check("...and /hs list does not claim one is current either",
+      chatMatching("(current)") == nil, table.concat(chat, " ~ "))
+
+-- (!) CLEARING ALONE IS NOT THE FIX: a list flagging a DIFFERENT slot has to
+-- WIN over the one held from the previous list, not be merged with it. A
+-- marker that only ever clears is just the same bug pointing at nothing.
+chat = {}
+slash("list")
+msg("H|1:1519:0:Stormwind|2:4395:1:Dalaran Inn")
+msg("E|2")
+check("a later list moves the marker to the row the server flags",
+      NorgHearth_Current() == 2
+      and row(2):GetText():find("cff40ff40", 1, true) ~= nil
+      and row(1):GetText():find("cff40ff40", 1, true) == nil,
+      tostring(NorgHearth_Current()))
+
+-- (!) AND A HALF-ARRIVED LIST MUST NOT GET A VOTE. Batches accumulate until E|
+-- commits them; an abandoned list that had flagged a row would otherwise carry
+-- its marker into whatever the next answer says.
+chat = {}
+slash("list")
+msg("H|1:1519:1:Stormwind")     -- first batch of a list that never finishes
+slash("list")                   -- ask again -- the pending list is discarded
+msg("H|1:1519:0:Stormwind|2:4395:0:Dalaran Inn")
+msg("E|2")
+check("a discarded list does not carry its marker into the next one",
+      NorgHearth_Current() == nil, tostring(NorgHearth_Current()))
+
+-- ================= THE SAME LIE THROUGH THE SECOND DOOR: STALE WHILE OPEN
+-- (!) Clearing the marker when the answer says "none" only helps if an answer
+-- ARRIVES. Leave the window open, walk to an innkeeper and bind: no event this
+-- addon registers tells it the bind moved, and every other fetch waits on the
+-- player doing something -- opening the window, /hs list, saving -- so the
+-- arrow sat beside the previous bind for as long as the window stayed up. The
+-- fix is a re-ask on a timer while the window is shown, driven here through the
+-- addon's REAL OnUpdate.
+local hearthFrame = byName["NorgHearthFrame"]
+local tick = hearthFrame._scripts["OnUpdate"]
+check("the window carries an OnUpdate to re-ask on", tick ~= nil)
+
+if hearthFrame:IsShown() then slash("") end     -- start from closed, whatever ran above
+slash("")                                       -- open -> LIST
+msg("H|1:1519:1:Stormwind|2:4395:0:Dalaran Inn")
+msg("E|2")
+check("positive control: it opens showing the bind the server flags",
+      NorgHearth_Current() == 1, tostring(NorgHearth_Current()))
+
+sent = {}
+tick(hearthFrame, 2)
+check("a couple of seconds passing does not re-ask", #sent == 0, tostring(lastSent()))
+tick(hearthFrame, 4)                            -- 6s in total, past the period
+check("an open window re-asks the server by itself",
+      lastSent() == "NORGHOME LIST", tostring(lastSent()))
+
+-- ...and here is the bind made at an inn that is not on the list: every row 0.
+msg("H|1:1519:0:Stormwind|2:4395:0:Dalaran Inn")
+msg("E|2")
+check("...and the fresh answer clears an arrow that went stale in place",
+      NorgHearth_Current() == nil
+      and row(1):GetText():find("cff40ff40", 1, true) == nil,
+      tostring(NorgHearth_Current()))
+
+-- A PERIOD, NOT A BURST: the clock restarts on every re-ask, including the ones
+-- the addon makes for its own reasons (see RequestList).
+sent = {}
+tick(hearthFrame, 4)
+check("the clock restarts after a re-ask", #sent == 0, tostring(lastSent()))
+tick(hearthFrame, 2)
+check("...and then it asks again", lastSent() == "NORGHOME LIST", tostring(lastSent()))
+
+-- (!) A CLOSED WINDOW MUST BE SILENT. In game OnUpdate does not run on a hidden
+-- frame at all, so this asserts the addon does not lean on that alone -- and it
+-- is the check that fails if anyone moves the timer onto a permanent frame.
+slash("")                                       -- close
+sent = {}
+tick(hearthFrame, 60)
+check("a closed window sends nothing at all", #sent == 0, tostring(lastSent()))
+slash("")                                       -- leave it open, as the blocks below found it
+
 -- ===================================================================== refusals
 chat = {}
 msg("X|FULL")
@@ -309,6 +464,31 @@ msg("X|DUPNAME")
 -- the wording changed; a test on the old phrase would have passed forever.
 check("DUPNAME is explained", chatMatching("already have a bind saved") ~= nil, lastChat())
 check("DUPNAME blames the place, not a name", chatMatching("that name") == nil, lastChat())
+
+-- (!) AND THE README MUST QUOTE IT WORD FOR WORD. Its troubleshooting section
+-- tells the player what they will see on screen; a PARAPHRASE there ("Already
+-- saved that place", which is what it used to say) is worse than no quote at
+-- all, because somebody searching the page for the line they are looking at
+-- finds nothing and concludes the doc describes a different addon. Compared
+-- against the addon's own REFUSAL table, so rewording the message fails here
+-- rather than in a player's face. Whitespace is flattened first: the README
+-- wraps its columns, and a quote that spans a line break is still a quote.
+local function fileText(p)
+    local f = io.open(p)
+    if not f then return nil end
+    local s = f:read("*a")
+    f:close()
+    return s
+end
+local srcText    = fileText(ADDON)
+local readmeText = fileText((ADDON:gsub("NorgHearth%.lua$", "README.txt")))
+local dupWords   = srcText and srcText:match('DUPNAME%s*=%s*"([^"]*)"')
+check("the addon's DUPNAME wording is readable from source", dupWords ~= nil, tostring(dupWords))
+check("the README is next to the addon", readmeText ~= nil, tostring(readmeText and #readmeText))
+check("...and quotes the DUPNAME refusal word for word",
+      readmeText ~= nil and dupWords ~= nil
+      and readmeText:gsub("%s+", " "):find(dupWords, 1, true) ~= nil,
+      tostring(dupWords))
 
 -- (!) The server can grow a refusal code long before this addon is redistributed.
 -- An unknown one must still say something -- a silent no-op is the worst answer
@@ -394,13 +574,39 @@ check("/hs help explains the innkeeper rule",
       chatMatching("innkeeper") ~= nil, lastChat())
 
 -- UI_TESTS_MARKER ======================= the UI must work without typing
--- (!) Everything was reachable only via /hs save <name> -- a chat command
--- wearing a window. These assert the MOUSE path.
+-- (!) A window you can only drive by typing at it is a chat command wearing a
+-- window. These assert the MOUSE path: open from the minimap, save from the
+-- button.
 check("minimap button exists after login", _G.NorgHearthMinimapButton ~= nil)
 check("minimap button has a click handler",
       _G.NorgHearthMinimapButton and _G.NorgHearthMinimapButton._scripts["OnClick"] ~= nil)
-check("a name box exists", _G.NorgHearthName ~= nil)
+-- (!) THE BOTTOM STRIP IS ONE CONTROL. Asserted through _G as well as byName
+-- because a stray widget is only ever found by looking for it: the addon works
+-- perfectly with three dead ones stacked underneath, which is how an earlier
+-- cut was built.
 check("a Save button exists", _G.NorgHearthSave ~= nil)
+check("and it is the only bottom control -- no boxes, no second button",
+      _G.NorgHearthName == nil and _G.NorgHearthNameBox == nil
+      and _G.NorgHearthSaveButton == nil)
+
+-- (!) AND THE INSTRUCTION IS PRINTED ONCE. The empty-list line sits near the
+-- top and the hint sits at the foot, and on a first run BOTH are on screen: an
+-- earlier cut had them contradicting each other (one asking for a typed name
+-- the button no longer wanted), and merely agreeing is not the fix -- two
+-- labels teaching the same step is how they drifted apart in the first place.
+-- Counted over the window's own FontStrings, which is where a third copy would
+-- appear. The buttons keep their text in _text, so only labels are counted.
+local instructions = {}
+for _, r in ipairs(frames) do
+    if type(r.text) == "string" and r.text:find("innkeeper", 1, true) then
+        instructions[#instructions + 1] = r.text
+    end
+end
+check("the window teaches the innkeeper step exactly once", #instructions == 1,
+      #instructions .. ": " .. table.concat(instructions, " ~ "))
+check("...and the label that keeps it is the one that also says what Save does",
+      instructions[1] ~= nil and instructions[1]:find("Save", 1, true) ~= nil,
+      tostring(instructions[1]))
 
 -- (!) THE BUTTON SENDS A BARE SAVE. The server names the bind after the city
 -- it sits in, so the client must NOT invent or require a name. If this ever

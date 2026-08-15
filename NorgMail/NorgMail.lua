@@ -39,6 +39,14 @@
   is skipped too -- it is there for a reason and should be read.
 ------------------------------------------------------------------------------]]
 
+-- (!) THE VERSION IS READ FROM THE .toc, NEVER COPIED INTO A CONSTANT HERE. The
+-- login line is step one of the wiki's troubleshooting page, and a second copy of
+-- the number drifts from the .toc in silence, and nothing in the game can then
+-- tell you which of the two you are reading. "?" means the client never indexed
+-- this folder, which is itself the answer to "why is nothing happening".
+local ADDON          = "NorgMail"   -- FOLDER name; GetAddOnMetadata keys on that
+local VERSION        = GetAddOnMetadata(ADDON, "Version") or "?"
+
 local TICK           = 0.15   -- how often we look, not how fast we take
 local CHANGE_TIMEOUT = 2.0    -- see note 4
 local INBOX_GRACE    = 3.0    -- see note 2
@@ -106,7 +114,17 @@ local function MarkAllRead()
     local unread = 0
     for i = 1, n do
         if not select(9, GetInboxHeaderInfo(i)) then
-            if GetInboxText then GetInboxText(i) end
+            -- (!) DO NOT MARK A MAIL WE DELIBERATELY SKIPPED. C.O.D. and GM mail are
+            -- never taken, so reading them here would drop stillUnread to zero, hide
+            -- the minimap icon, and leave that mail with NOTHING pointing at it until
+            -- it expires. The chat line naming the skip scrolls away; the icon is the
+            -- only durable reminder. Same fields the take pass gates on (6 CODAmount,
+            -- 13 isGM) so the two can never disagree about what was skipped.
+            local cod  = select(6,  GetInboxHeaderInfo(i))
+            local isGM = select(13, GetInboxHeaderInfo(i))
+            if not ((cod and cod > 0) or isGM) then
+                if GetInboxText then GetInboxText(i) end
+            end
             unread = unread + 1
         end
     end
@@ -291,7 +309,8 @@ f:SetScript("OnEvent", function(_, event)
         -- "/mail did nothing" is ambiguous between a broken addon and one the
         -- client never loaded -- and 3.3.5a only scans the AddOns folder at
         -- LAUNCH, so a freshly copied addon is invisible until a full restart.
-        Say("loaded. Use the Take All button on the inbox, or /mail. /mail auto for automatic.")
+        Say("v" .. VERSION ..
+            " loaded. Use the Take All button on the inbox, or /mail. /mail auto for automatic.")
         return
     end
 

@@ -2,7 +2,8 @@
   NorgHearth -- keep several hearthstone destinations and pick between them.
 
   /hs              open the window
-  /hs save <name>  remember where you are bound right now, under that name
+  /hs save         remember where you are bound right now, named after the place
+  /hs save <name>  the same, under a name you choose instead
   /hs use <n>      make saved bind <n> the live one
   /hs del <n>      forget saved bind <n>
   /hs list         print the list to chat
@@ -11,40 +12,62 @@
   HOW IT WORKS, because it is not what people assume.
 
   Nothing here touches the hearthstone. You bind at an innkeeper exactly as
-  normal; SAVE copies the bind the SERVER already holds, under a name; USE asks
+  normal; SAVE copies the bind the SERVER already holds, naming it after the
+  place that bind sits in unless you insist on a name of your own; USE asks
   the server to move your bind back to a saved one. The stone stays the ordinary
-  stone -- same cast bar, same 30 minute cooldown -- because it IS the ordinary
-  stone, and this only ever changes where it points.
+  stone -- same cast bar, same cooldown -- because it IS the ordinary stone, and
+  this only ever changes where it points.
 
-  That is also why there is no "bind to here" command: the only way a bind gets
-  into this list is by having been made at an innkeeper in the first place.
+  That is also why there is no "bind to here" command: Save() in norg_home.cpp
+  copies the homebind the core already holds (m_homebind*) and takes no
+  coordinates from the client.
 
   (!) THE SLOT NUMBER IS NOT THE ROW NUMBER. Slots are reused after a delete, so
   a list can read 1, 3, 4 -- and row 2 is then slot 3. Every button carries the
   slot it was rendered with, never its position, or deleting one entry silently
   re-aims the buttons below it at their neighbours.
 
+  (!) WHICH BIND IS LIVE IS THE SERVER'S ANSWER, AND THAT INCLUDES THE ANSWER
+  "none of them". You can be bound at an inn you never saved, and the server
+  says so by flagging every row 0. See the E| handler for what happens when
+  that is treated as "nothing to update" instead of as an answer.
+
+  (!) AND THAT ANSWER GOES STALE WHILE YOU LOOK AT IT. Binding at an innkeeper
+  raises no event this addon registers, so an open window re-asks on a timer --
+  see the OnUpdate note in Build for why polling, of all things, is the honest
+  answer here.
+
   (!) A NEWLY COPIED ADDON IS INVISIBLE UNTIL A FULL CLIENT RESTART. 3.3.5a scans
-  the AddOns folder at LAUNCH only; /reload will not find it. "/hs did nothing"
-  is nearly always this rather than a bug.
+  the AddOns folder at LAUNCH only; /reload will not find it. Rule that out
+  before hunting for a bug behind "/hs did nothing".
 ------------------------------------------------------------------------------]]
 
-local VERSION  = "1.0"
+-- (!) THE VERSION IS READ FROM THE .toc, NEVER COPIED INTO A CONSTANT HERE. The
+-- login line below is step one of the wiki's troubleshooting page, and a second
+-- copy of the number drifts from the .toc in silence, and nothing in the game can
+-- then tell you which of the two you are reading. "?" means the client never
+-- indexed this folder, which is itself the answer to "why is nothing happening".
+local ADDON    = "NorgHearth"    -- FOLDER name; GetAddOnMetadata keys on that
+local VERSION  = GetAddOnMetadata(ADDON, "Version") or "?"
 local PREFIX   = "NORGHOME"      -- server module channel; the addon is NorgHearth
 local MAX_ROWS = 8               -- must match MAX_BINDS in norg_home.cpp
 local MAX_NAME = 24              -- must match the varchar(24) name column
+local REFRESH_EVERY = 5          -- seconds between re-asks while the window is OPEN
 
-local frame, rows, nameBox, emptyFS
+local frame, rows, emptyFS
+local sinceRefresh = 0 -- seconds the open window has gone without re-asking
 local BuildMinimapButton   -- defined below; see the note at its definition
 local binds   = {}     -- rendered list: { {slot, area, name}, ... } in slot order
 local pending          -- rows arriving between H| batches; nil when not listing
+local pendingCurrent   -- slot flagged live WITHIN that arriving list; nil = none
 local current          -- slot the server says is the LIVE bind
 local wantPrint        -- /hs list is waiting for the answer; see PrintList
 
--- (!) EVERY LOOKUP IS WRITTEN "REFUSAL[c] or <fallback>", AND THE FALLBACK IS
--- LOAD-BEARING. The server can grow a new refusal code long before this addon is
--- redistributed, and a missing entry must still say something -- an unexplained
--- silent no-op is the worst possible answer to "why will it not save".
+-- (!) THE LOOKUP IS WRITTEN "REFUSAL[c] or <fallback>" (see the X| handler), AND
+-- THE FALLBACK IS LOAD-BEARING. The server can grow a new refusal code long
+-- before this addon is redistributed, and a missing entry must still say
+-- something -- an unexplained silent no-op is the worst possible answer to
+-- "why will it not save".
 local REFUSAL = {
     NONAME   = "give it a name first  --  /hs save <name>",
     LONGNAME = "that name is too long (" .. MAX_NAME .. " characters at most).",
@@ -73,9 +96,27 @@ local function RequestList()
     -- (!) DROP ANY HALF-ARRIVED LIST FIRST. Batches accumulate until E| closes
     -- them, so a list that was interrupted -- by a zone change, a disconnect, or
     -- simply asking again -- would otherwise merge into the next one and show
-    -- every entry twice.
-    pending = nil
+    -- every entry twice. The half-arrived list's live-bind flag goes with it, or
+    -- the abandoned list gets a vote in what the next one marks.
+    pending, pendingCurrent = nil, nil
+    -- EVERY re-ask restarts the open window's clock, not just the timed one. A
+    -- list fetched because the window opened, or because a save landed, is as
+    -- fresh as one the timer asked for, and following it a moment later with a
+    -- second LIST is noise.
+    sinceRefresh = 0
     Send("LIST")
+end
+
+--- Ask first, then show, so the request is already in flight when the window
+--- appears. It does NOT make the window fresh: the rows on screen are still the
+--- previous answer until the E| for this one lands (see the emptyFS note in
+--- Build for the other half of that gap). Both ways in -- the slash toggle and
+--- the minimap button -- go through here, so the ask cannot be wired to one and
+--- forgotten on the other.
+local function OpenWindow()
+    if not frame then return end
+    RequestList()
+    frame:Show()
 end
 
 --- (!) STRIP THE FRAMING CHARACTERS HERE, BEFORE SENDING.
@@ -99,7 +140,7 @@ end
 --- itself surfaces in chat as a whisper to yourself, and that IS the diagnosis.
 local function PrintList()
     if #binds == 0 then
-        Say("nothing saved yet -- bind at an innkeeper, then /hs save <name>.")
+        Say("nothing saved yet -- bind at an innkeeper, then /hs and click Save.")
         return
     end
     for _, b in ipairs(binds) do
@@ -129,9 +170,9 @@ local function Render()
             r.use:Show()
             r.del:Show()
         else
-            -- (!) CLEAR THE SLOT, do not merely hide. A hidden button cannot be
-            -- clicked in game, but a stale slot left on it is a live wrong answer
-            -- the moment the row is shown again for a different bind.
+            -- (!) CLEAR THE SLOT, do not merely hide. Hiding is not enough on its
+            -- own: a stale slot left on the button is a live wrong answer the
+            -- moment the row is shown again for a different bind.
             r.slot = nil
             r.use:Hide()
             r.del:Hide()
@@ -165,8 +206,10 @@ local function SaveNamed(raw)
         return
     end
     if #name > MAX_NAME then
-        -- Refuse rather than truncate, exactly as the server does: a silently
-        -- shortened name is a bind that is not called what you called it.
+        -- Refuse rather than truncate: a silently shortened name is a bind that
+        -- is not called what you called it. The server agrees for a name the
+        -- player CHOSE, which is the only kind that reaches here -- it truncates
+        -- only the names it derives itself (Save() in norg_home.cpp).
         Say(REFUSAL.LONGNAME)
         return
     end
@@ -188,7 +231,11 @@ local function OnMessage(msg)
             if slot then
                 slot = tonumber(slot)
                 pending[#pending + 1] = { slot = slot, area = tonumber(area), name = name }
-                if cur == "1" then current = slot end
+                -- (!) PARK IT, DO NOT APPLY IT. Writing straight to `current` here
+                -- publishes half a list -- and, worse, cannot express "no row is
+                -- live", because that answer is the ABSENCE of a flag rather than
+                -- any record. E| below is what commits it.
+                if cur == "1" then pendingCurrent = slot end
             end
         end
         return
@@ -199,10 +246,18 @@ local function OnMessage(msg)
         -- zero case as "the server says you have none", an empty answer would be
         -- indistinguishable from a reply that never arrived and the window would
         -- sit on stale rows forever.
-        local n = tonumber(msg:match("^E|(%d+)")) or 0
+        --
+        -- (!) ASSIGN THE MARKER, NEVER MERGE IT. The server computes <cur> per row
+        -- and an all-zero list is a real answer: you are bound at an inn you have
+        -- not saved. An earlier cut only ever SET current -- it cleared it solely
+        -- on E|0 -- so the arrow and "(current)" stayed beside whichever bind was
+        -- live LAST. The intended flow is the worst case: bind at a new inn, open
+        -- /hs to save it, and the panel spends that whole moment pointing at your
+        -- PREVIOUS bind. Being a session variable it was honest after a fresh
+        -- login, which is how it went unnoticed.
         binds = pending or {}
-        pending = nil
-        if n == 0 then current = nil end
+        current = pendingCurrent
+        pending, pendingCurrent = nil, nil
         Render()
         if wantPrint then
             wantPrint = false
@@ -258,7 +313,12 @@ local function Build()
     -- not render at all -- the edge insets exceed the frame and there is nothing
     -- left to draw. This cost NorgOneBag a whole version.
     f:SetWidth(250)
-    f:SetHeight(186 + MAX_ROWS * 26)
+    -- (!) THE HEIGHT IS DERIVED FROM THE LAYOUT, NOT GUESSED. 44 above the first
+    -- row and 26 per row (both repeated in the row loop below), then the bottom
+    -- strip read upwards from the Save button: 16 of padding, the 24 tall button,
+    -- 10 of gap, room for a wrapped hint (42), 10 = 146. Move anything in the
+    -- strip and move this with it, or the hint wraps out through the backdrop.
+    f:SetHeight(146 + MAX_ROWS * 26)
     f:SetFrameStrata("HIGH")
     f:SetToplevel(true)
     f:EnableMouse(true)
@@ -271,6 +331,56 @@ local function Build()
         NorgHearthDB = NorgHearthDB or {}
         NorgHearthDB.pos = { p, rp, x, y }
     end)
+
+    -- (!) THE OPEN WINDOW RE-ASKS ON A TIMER, BECAUSE NOTHING TELLS IT TO.
+    -- Leave /hs open, walk to an innkeeper and bind: the server's answer has
+    -- changed and this panel heard nothing, so it keeps the green arrow beside
+    -- your PREVIOUS bind -- the same lie the E| handler exists to stop, arriving
+    -- through a second door. Every other fetch waits on the player doing
+    -- something -- opening the window, typing /hs list, or saving -- and none of
+    -- those happen while they are away at the innkeeper.
+    --
+    -- No event was found to hang this on, which is why it is a timer:
+    --   * CONFIRM_BINDER is the innkeeper's PROMPT ("make this your home?"),
+    --     not the bind. Reasoning: it comes with the dialog, so it arrives
+    --     before there is anything new to read and arrives whether you then
+    --     accept or decline -- refreshing on it re-reads the OLD bind.
+    --   * The bind actually landing reaches the client as SMSG_BINDPOINTUPDATE
+    --     (norg_home.cpp sends one itself on USE, for the world map's home
+    --     marker). Nothing turns that packet into an event this addon can
+    --     register; HEARTHSTONE_BOUND is a later-client name and was not
+    --     confirmed for this one.
+    --     (!) DO NOT "FIX" THAT BY REGISTERING A LIKELY-LOOKING NAME. An event
+    --     this client does not know never fires, silently, and the panel would
+    --     then look repaired while going stale exactly as before. If a client
+    --     is ever VERIFIED to raise one, register it AND keep this timer: the
+    --     timer is what covers everything nobody thought of.
+    --   * The SERVER cannot push it either. norg_home.cpp's header records that
+    --     the core has no PlayerScript hook for homebind (only
+    --     OnPlayerBindToInstance, which is instance saves), so the module never
+    --     learns you rebound; it can only answer a LIST it was asked for.
+    --
+    -- So: poll, and only while the window is up. OnUpdate does not run on a
+    -- hidden frame, so "only while open" costs nothing to enforce -- the IsShown
+    -- check below is belt-and-braces for one case only, a later change that
+    -- reparents or reuses this frame, and it is what lets the harness prove a
+    -- closed window sends nothing. A timed self-whisper is not a new risk here:
+    -- NorgQuest sends SCAN from its own OnUpdate on a RESCAN_SECS timer, gated
+    -- on what is tracked rather than on anything being visible.
+    -- (!) DO NOT SHORTEN THIS TO THE LENGTH OF A ROUND TRIP: a re-ask DISCARDS
+    -- any half-arrived batch (see RequestList), so a period near the reply time
+    -- would keep cancelling the answer it is waiting for. And on a server with
+    -- no module the whisper is not swallowed, so an open window drips one
+    -- visible line to yourself every REFRESH_EVERY seconds -- the same diagnosis
+    -- the very first /hs already gave you, just repeated.
+    f:SetScript("OnUpdate", function(self, elapsed)
+        if not self:IsShown() then return end
+        sinceRefresh = sinceRefresh + (elapsed or 0)
+        if sinceRefresh >= REFRESH_EVERY then
+            RequestList()          -- resets sinceRefresh; every re-ask does
+        end
+    end)
+
     f:SetBackdrop({
         bgFile   = "Interface\\DialogFrame\\UI-DialogBox-Background",
         edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
@@ -285,48 +395,29 @@ local function Build()
     local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -6, -6)
 
+    -- (!) STATE HERE, INSTRUCTION AT THE BOTTOM -- SAY IT IN ONE PLACE. This
+    -- line sits near the top and hintFS at the foot of the window, and on a
+    -- first run both are on screen telling the player to bind at an innkeeper
+    -- and press Save. (An earlier cut was worse: they CONTRADICTED each other,
+    -- this one asking for a typed name that the button no longer wanted.) The
+    -- hint stays on screen and explains the naming too, so it keeps the sentence;
+    -- this one is left saying only the thing the hint has no business repeating,
+    -- that there is nothing in the list.
+    -- (!) IT IS NOT A LOADING INDICATOR, and does not pretend to be one. It is
+    -- drawn when the window is built and Render is what hides it, so on the
+    -- first open of a session -- before any answer has arrived -- it says
+    -- "nothing saved yet" about a list it has not seen. Afterwards it tracks the
+    -- last answer that DID arrive rather than the one in flight, which is the
+    -- same one-round-trip lag the rows have and not a standing lie. If that gap
+    -- ever needs covering, hide this until the first E| rather than teaching the
+    -- hint to say it as well.
     emptyFS = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     emptyFS:SetPoint("TOP", f, "TOP", 0, -52)
     emptyFS:SetWidth(210)
     emptyFS:SetJustifyH("CENTER")
-    emptyFS:SetText("Nothing saved yet. Bind at an innkeeper, then type a name below and Save.")
+    emptyFS:SetText("Nothing saved yet.")
 
     rows = {}
-    -- (!) NO TYPING REQUIRED. Everything here was reachable only through
-    -- /hs save <name>, which is a chat command wearing a window. The name box
-    -- and Save button below make the whole feature usable with the mouse; the
-    -- slash commands stay as an alias, not as the interface.
-    -- (!) NO NAME TO TYPE. The server names a bind after the CITY it sits in --
-    -- an inn in Valley of Strength saves as "Orgrimmar" -- so the box that used
-    -- to be here was asking the player to invent a label for a place they had
-    -- just walked to. One button, no keyboard. The EditBox stays but hidden, so
-    -- /hs save <name> can still push a chosen name down the same path.
-    local box = CreateFrame("EditBox", "NorgHearthName", f, "InputBoxTemplate")
-    box:SetAutoFocus(false)
-    box:SetMaxLetters(24)
-    box:Hide()
-
-    local save = CreateFrame("Button", "NorgHearthSave", f, "UIPanelButtonTemplate")
-    save:SetWidth(200)
-    save:SetHeight(24)
-    save:SetPoint("BOTTOM", f, "BOTTOM", 0, 18)
-    save:SetText("Save current location")
-
-    local hintFS = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    hintFS:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 20, 42)
-    hintFS:SetWidth(214)
-    hintFS:SetJustifyH("LEFT")
-    hintFS:SetText("Bind at an innkeeper, then click Save -- it is named after the city.")
-
-    local function DoSave()
-        -- Bare SAVE: the server derives the name from where you are bound.
-        SaveNamed("")
-    end
-    save:SetScript("OnClick", DoSave)
-    -- Enter saves too; Escape gets you out without the box eating the key.
-    box:SetScript("OnEnterPressed", DoSave)
-    box:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-
     for i = 1, MAX_ROWS do
         local y = -44 - (i - 1) * 26
 
@@ -351,27 +442,47 @@ local function Build()
         rows[i] = r
     end
 
-    nameBox = CreateFrame("EditBox", "NorgHearthNameBox", f, "InputBoxTemplate")
-    nameBox:SetWidth(140)
-    nameBox:SetHeight(20)
-    nameBox:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 22, 22)
-    nameBox:SetAutoFocus(false)
-    nameBox:SetMaxLetters(MAX_NAME)
+    -- ------------------------------------------------------------ bottom strip
+    -- (!) ONE SAVE CONTROL, AND NO NAME BOX AT ALL. The server names a bind after
+    -- the place its homebind sits in, rolling a subzone up to its zone -- an inn
+    -- in Valley of Strength saves as "Orgrimmar" (PlaceName in norg_home.cpp) --
+    -- so there is nothing here for the player to type. An earlier cut shipped
+    -- still building the widgets that flow replaced, stacked over this button:
+    --   NorgHearthName        a hidden EditBox, never given a SetPoint and
+    --                         Hide()n at creation, so it could not take a
+    --                         keystroke. Dead, and nothing read it.
+    --   NorgHearthNameBox +   a visible box and a second small Save that read
+    --   NorgHearthSaveButton  it and sent SAVE <whatever you typed>. That pair
+    --                         WORKED -- it was the mouse route to a name of
+    --                         your own.
+    -- They sat over this button without stopping it working, so nothing
+    -- MISBEHAVED and the pile survived review looking merely half-finished.
+    --
+    -- (!) SO THE REMOVAL WAS NOT FREE, whatever the "costs nothing" note that
+    -- used to sit here claimed. What went with the pair is typing a name IN THE
+    -- WINDOW. What did not: the slash handler parses its own argument and never
+    -- read either box, so /hs save <name> still passes a chosen name through and
+    -- the server still prefers it over the derived one -- see Save() in
+    -- norg_home.cpp, where the name is derived only when the client sent none.
+    -- The trade was deliberate: asking somebody to invent a label for the inn
+    -- they just walked into is busywork whenever the city name is what they
+    -- wanted anyway. It is still a trade, so restore the pair if the typed name
+    -- ever turns out to be the common case -- do not restore it by accident.
+    local save = CreateFrame("Button", "NorgHearthSave", f, "UIPanelButtonTemplate")
+    save:SetWidth(200)
+    save:SetHeight(24)
+    save:SetPoint("BOTTOM", f, "BOTTOM", 0, 16)
+    save:SetText("Save current location")
+    save:SetScript("OnClick", function()
+        -- Bare SAVE: the server derives the name from where you are bound.
+        SaveNamed("")
+    end)
 
-    local save = CreateFrame("Button", "NorgHearthSaveButton", f, "UIPanelButtonTemplate")
-    save:SetWidth(70)
-    save:SetHeight(22)
-    save:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -16, 20)
-    save:SetText("Save")
-
-    local function SaveFromBox()
-        SaveNamed(nameBox:GetText())
-        nameBox:SetText("")
-        nameBox:ClearFocus()
-    end
-    save:SetScript("OnClick", SaveFromBox)
-    nameBox:SetScript("OnEnterPressed", SaveFromBox)
-    nameBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    local hintFS = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    hintFS:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 20, 50)
+    hintFS:SetWidth(210)
+    hintFS:SetJustifyH("LEFT")
+    hintFS:SetText("Bind at an innkeeper, then click Save -- it is named after the city.")
 
     tinsert(UISpecialFrames, "NorgHearthFrame")   -- Escape closes it, like stock frames
     f:Hide()
@@ -414,8 +525,10 @@ end)
 -- ---------------------------------------------------------------------- command
 
 -- (!) A MINIMAP BUTTON, because "type /hs" is not a user interface. Position is
--- an angle around the minimap, saved per character, so it survives a reload and
--- does not fight whatever else is already clustered there.
+-- an angle around the minimap, kept in NorgHearthDB so it survives a reload and
+-- can be dragged clear of whatever else is already clustered there. The .toc
+-- declares that as "## SavedVariables", so the angle -- and the window position
+-- saved next to it -- is shared by every character on the account.
 function BuildMinimapButton()
     if NorgHearthMinimapButton then return end
 
@@ -443,9 +556,8 @@ function BuildMinimapButton()
     ring:SetPoint("TOPLEFT", b, "TOPLEFT", 0, 0)
 
     local function Place(angle)
-        -- 80 is the minimap radius plus the button's own half-width; the button
-        -- sits ON the ring rather than inside it, which is where every other
-        -- addon puts theirs.
+        -- 80 puts the button out on the minimap ring rather than inside the map
+        -- itself, where it would sit over the terrain and the blips.
         b:SetPoint("CENTER", Minimap, "CENTER",
                    80 * cos(angle), 80 * sin(angle))
     end
@@ -465,8 +577,13 @@ function BuildMinimapButton()
     b:SetScript("OnDragStop", function(self) self:SetScript("OnUpdate", nil) end)
 
     b:SetScript("OnClick", function()
-        if not frame then Build() end
-        if frame:IsShown() then frame:Hide() else RequestList() frame:Show() end
+        -- (!) KEEP THE ASSIGNMENT. `Build()` alone builds a second window and
+        -- leaves the upvalue nil, so the very next line indexes nil. It never
+        -- fires today -- PLAYER_LOGIN builds the frame before this button
+        -- exists -- but a nil-guard that crashes when it triggers is worse than
+        -- none at all.
+        if not frame then frame = Build() end
+        if frame:IsShown() then frame:Hide() else OpenWindow() end
     end)
 
     b:SetScript("OnEnter", function(self)
@@ -483,14 +600,15 @@ SLASH_NORGHEARTH1 = "/hs"
 SLASH_NORGHEARTH2 = "/norghearth"
 SlashCmdList["NORGHEARTH"] = function(arg)
     arg = arg or ""
-    -- (!) LOWER-CASE THE VERB ONLY. Lower-casing the whole line -- which is what
-    -- every other Norg addon does, because none of them carry free text -- would
-    -- quietly rename "Dalaran" to "dalaran" on the way to the server.
+    -- (!) LOWER-CASE THE VERB ONLY. The tail is free text -- a name the player
+    -- chose -- so lower-casing the whole line, which is the usual shape of a
+    -- slash handler, would quietly rename "Dalaran" to "dalaran" on the way to
+    -- the server.
     local cmd, rest = arg:match("^%s*(%S*)%s*(.-)%s*$")
     cmd = (cmd or ""):lower()
 
     if cmd == "help" or cmd == "?" then
-        Say("/hs -- open the window;  /hs save <name> -- remember your current bind")
+        Say("/hs -- open the window;  /hs save [name] -- remember your current bind")
         Say("/hs use <n> / /hs del <n> -- switch to, or forget, a saved bind;  /hs list")
         Say("Binds come from innkeepers only: bind as normal, then save it here.")
         return
@@ -510,8 +628,7 @@ SlashCmdList["NORGHEARTH"] = function(arg)
     if frame:IsShown() then
         frame:Hide()
     else
-        RequestList()
-        frame:Show()
+        OpenWindow()
     end
 end
 

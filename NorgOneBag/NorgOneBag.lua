@@ -15,6 +15,14 @@
 ------------------------------------------------------------------------------]]
 
 local ADDON     = "NorgOneBag"
+
+-- (!) THE VERSION IS READ FROM THE .toc, NEVER COPIED INTO A CONSTANT HERE. The
+-- login line is step one of the wiki's troubleshooting page, and a second copy of
+-- the number drifts from the .toc in silence, and nothing in the game can then
+-- tell you which of the two you are reading. "?" means the client never indexed
+-- this folder, which is itself the answer to "why is nothing happening".
+local VERSION   = GetAddOnMetadata(ADDON, "Version") or "?"
+
 local COLS      = 12      -- items per row
 local BTN_SIZE  = 39      -- 37px stock button + 2px gap (spacing, not button size)
 local PAD       = 10
@@ -252,7 +260,8 @@ ev:SetScript("OnEvent", function(_, event)
         CloseAllBags    = Close
         ToggleAllBags   = Toggle
 
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00NorgOneBag|r loaded. /onebag to toggle.")
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00NorgOneBag|r v" .. VERSION ..
+            " loaded. /onebag to toggle.")
     else
         UpdateAll()
     end

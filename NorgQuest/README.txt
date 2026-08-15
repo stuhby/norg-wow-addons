@@ -1,4 +1,4 @@
-NorgQuest 1.0 -- points you at the nearest quest objective you can actually do
+NorgQuest 1.12 -- points you at the nearest quest objective you can actually do
 ==============================================================================
 
 INSTALL
@@ -7,7 +7,10 @@ INSTALL
   so that you end up with
       Interface\AddOns\NorgQuest\NorgQuest.toc
 
-  Then restart the client (or /reload).
+  Then FULLY RESTART the client. A new addon FOLDER is invisible to a 3.3.5a
+  client until it starts up again -- /reload will not find it, and the addon
+  simply will not appear in the list. /reload is fine for later updates that
+  only change files already there.
 
   NorgNav is not required, but the two are designed to sit side by side.
 
@@ -24,7 +27,10 @@ WHY THIS INSTEAD OF QuestHelper
     Your progress      read from your real quest-log counters and your bags
                        (including the bank), so a finished objective is never
                        offered.
-    Where things are   read from the spawn tables the world is built from.
+    Where things are   read from the spawn tables the world is built from --
+                       and for an escort or event NPC who is loaded nearby,
+                       from where he is standing RIGHT NOW rather than from
+                       where he spawned.
     How to get there   a real navmesh route, the same one the server's own
                        creatures walk, so the arrow goes round the hill and
                        into the cave mouth instead of through them.
@@ -39,6 +45,7 @@ COMMANDS
   /quest <text>    track the quest whose title matches
   /quest scan      ask the server again
   /quest off       stop
+  /quest why       print what is being tracked and why
   /quest help      this list
 
   /nq works as a short form. Drag the panel anywhere; it remembers.
@@ -52,15 +59,28 @@ WHO OWNS THE ARROW
 
 
 WHAT THE WORDING MEANS
-  plain distance                a complete walkable route; that is how far you
+  Distance and route
+    plain distance              a complete walkable route; that is how far you
                                 will actually walk
-  "long way"                    beyond the pathfinder's search horizon. The
+    "long way"                  beyond the pathfinder's search horizon. The
                                 arrow is correct and the route sharpens as you
                                 close in.
-  "straight line"               no walking route from where you stand -- across
+    "straight line"             no walking route from where you stand -- across
                                 water, or another continent
-  "as close as walking gets"    there is no path all the way; heading to the
+    "as close as walking gets"  there is no path all the way; heading to the
                                 nearest reachable point
+
+  The objective, in brackets after the quest name
+    "kill X" / "loot from X"    a creature, named because the server knows which
+                                one it sent you to
+    "use X"                     a gameobject -- a chest, a lever, a bonfire
+    "talk to X"                 an event step: a gossip option, a hand-in, or the
+                                NPC whose escort you have to start
+    "turn in to X"              everything is done; this is the hand-in
+    "explore"                   a PLACE, not a person. There is nothing standing
+                                there to interact with -- walk into it and the
+                                objective completes on its own. No name is shown
+                                because there is nobody to name.
 
 
 WHAT IT DELIBERATELY WILL NOT DO
@@ -69,6 +89,42 @@ WHAT IT DELIBERATELY WILL NOT DO
   live. This answers one question -- where is the nearest thing I can actually
   do right now -- and answers it correctly.
 
-  It stays silent on the remaining 12% of quests rather than guessing. Those are
-  mostly quests handed in to a script-spawned NPC, or objectives that are an
-  exploration trigger rather than a place.
+
+WHERE IT CAN STILL BE WRONG -- READ THIS BEFORE TRUSTING AN ARROW
+  Earlier versions of this file claimed the addon "stays silent rather than
+  guessing" on the quests it cannot place. That was never true of the code, and
+  believing it turns a wrong arrow into a wrong ANSWER, so here is what actually
+  happens.
+
+  It is silent only when it can find NOTHING AT ALL for a quest. That quest then
+  vanishes from /quest and /quest list entirely -- if a quest you expected is
+  missing, that is why, and it is not a bug you can see from the client. (One
+  rarer case looks the same: an objective that IS placed but sits on a continent
+  with no boat or zeppelin route from where you stand is dropped when you try to
+  track it, so it can disappear from the list at the moment you pick it.)
+
+  Otherwise it always offers its best available answer, and its LAST RESORT is to
+  name the person who takes the quest in. So when the real next step is something
+  the server cannot locate -- a scripted sequence, a spell that completes the
+  quest, an escort whose NPC is not loaded near you -- you will be pointed at the
+  TURN-IN NPC rather than at the objective. The arrow is honest about where that
+  NPC is; it is not a promise that he will accept the quest yet.
+
+  Two shapes to recognise:
+
+    Escort quests   Before you start one, the arrow points at the NPC you have to
+                    speak to -- correct. While the escort is running it follows
+                    him live, but only while he is loaded near you and only if he
+                    is an ordinary world spawn. For a SUMMONED escort it falls
+                    back to the spawn row instead, which is where he set off from
+                    and therefore behind you; and if his entry has no spawn row at
+                    all, back to the turn-in NPC.
+    Script quests   "Watch this happen", "cast this on that", quests finished by
+                    a cutscene. If the trigger is not in a table the server can
+                    read, you get the turn-in NPC instead, with no warning that
+                    the answer changed kind.
+
+  /quest why prints what the client currently believes -- what it is tracking,
+  which kind, how far, and the next few candidates. That is the right thing to
+  paste into a bug report, because "the arrow points somewhere wrong" cannot be
+  checked from chat alone.

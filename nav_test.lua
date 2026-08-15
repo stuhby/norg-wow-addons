@@ -71,9 +71,41 @@ _G.CreateFrame = newFrame
 _G.UIParent = newFrame("Frame", "UIParent")
 _G.UnitName = function() return "Dotty" end
 _G.GetPlayerFacing = function() return _G.__facing or 0 end
-_G.SendChatMessage = function(msg) table.insert(sent, msg) end
+-- (!) THE SERVER ACKNOWLEDGES EVERY START, AND WHEN IT DOES IS THE WHOLE POINT.
+--
+-- norg_nav.cpp installs the target and answers S|started in the same breath, so
+-- the acknowledgement is the client's only honest evidence of WHICH boss the
+-- server is death-checking -- and S|dead carries no id of its own. A harness
+-- that never sent the acknowledgement could not tell a correctly-credited kill
+-- from a mis-credited one, which is exactly the defect that shipped.
+--
+-- Deliberately NOT delivered inline from here: the mis-credit race IS the gap
+-- between sending a START and its acknowledgement arriving, so a test has to be
+-- able to leave one outstanding.
+local unacked = 0
+_G.SendChatMessage = function(msg)
+    table.insert(sent, msg)
+    if msg:find("^NORGNAV START ") then unacked = unacked + 1 end
+end
 _G.DEFAULT_CHAT_FRAME = { AddMessage = function(_, m) table.insert(chat, m) end }
 _G.SlashCmdList = {}
+
+-- (!) GetAddOnMetadata IS REAL IN 3.3.5a -- Atlas 3.x calls it at file scope, see
+-- atlas-src/Atlas-3/Atlas/Atlas.lua:39 -- but plain Lua has no such global, so
+-- without this stub the addon's version line is a nil call the moment it loads.
+-- It READS THE ACTUAL .toc rather than returning a literal: a hardcoded answer
+-- would keep passing for ever while the addon printed something else, which is
+-- the exact drift the version line exists to stop.
+_G.GetAddOnMetadata = function(folder, field)
+    if field ~= "Version" then return nil end
+    local f = io.open("/data/" .. folder .. "/" .. folder .. ".toc")
+    if not f then return nil end
+    local v
+    for line in f:lines() do v = v or line:match("^##%s*Version:%s*(.-)%s*$") end
+    f:close()
+    return v
+end
+local TOC_VERSION = _G.GetAddOnMetadata("NorgNav", "Version")
 
 dofile("/data/NorgNav/Data.lua")
 dofile("/data/NorgNav/NorgNav.lua")
@@ -92,9 +124,47 @@ end
 check("registered for addon messages", ev ~= nil)
 
 local function fire(event, ...) ev._scripts["OnEvent"](ev, event, ...) end
-local function reply(msg) fire("CHAT_MSG_ADDON", "NORGNAV", msg) end
+
+-- (!) KEEP THE FAKE SERVER'S IDEA OF WHAT IT OWES IN STEP WITH THE ADDON'S.
+--
+-- Two things retire an outstanding START: the acknowledgement itself -- however
+-- it is delivered, several blocks below send S|started by hand -- and a map
+-- change, on which the addon drops its own un-acknowledged queue, because an
+-- acknowledgement owed from a previous instance can no longer be attributed to
+-- anything. (That is the fail-safe, not a bug: an unattributable report is
+-- asked about rather than guessed at.) Without this the harness eventually
+-- delivers MORE acknowledgements than STARTs and every later attribution is one
+-- boss out of step -- which presents exactly like the defect under test.
+local fakeMap
+local function reply(msg)
+    local m = tonumber(msg:match("^M|(%d+)") or "")
+    if m and m ~= fakeMap then
+        fakeMap = m
+        unacked = 0
+    elseif msg:find("^S|started") or msg:find("^S|badargs") then
+        unacked = math.max(0, unacked - 1)
+    end
+    fire("CHAT_MSG_ADDON", "NORGNAV", msg)
+end
 local function tick(dt) ev._scripts["OnUpdate"](ev, dt) end
 local function lastSent() return sent[#sent] end
+-- Deliver the acknowledgement the server owes for every START sent so far.
+--
+-- (!) LET reply() DO THE BOOKKEEPING -- IT IS THE ONLY LEDGER. This used to
+-- decrement `unacked` itself as well, and reply() decrements it again, so it
+-- retired TWO debts per acknowledgement delivered and quietly left the last
+-- START of any run of three or more un-acknowledged. That reads as the addon
+-- ignoring a position stream when it is really the fake server never having
+-- answered -- exactly the mis-attribution the tests below exist to catch, but
+-- injected by the harness. The guard bounds it in case a future reply() stops
+-- retiring the debt at all; an infinite loop in a test suite reads as a hang.
+local function ackStarts()
+    local guard = 0
+    while unacked > 0 and guard < 64 do
+        guard = guard + 1
+        reply("S|started")
+    end
+end
 local function sentMatching(pat)
     for i = #sent, 1, -1 do if sent[i]:find(pat) then return sent[i] end end
 end
@@ -102,6 +172,9 @@ end
 -- ====================================================================== login
 fire("PLAYER_LOGIN")
 check("built its frame on login", _G.NorgNavFrame ~= nil)
+check("login banner names the version FROM THE .toc",
+      TOC_VERSION and chat[1] and chat[1]:find("v" .. TOC_VERSION, 1, true), chat[1])
+check("and announces itself exactly ONCE", #chat == 1, #chat)
 
 -- ============================================================= map discovery
 sent = {}
@@ -146,7 +219,18 @@ check("passes the spawn id so the server can report the kill",
       startMsg and startMsg:match("START [%-%d%.]+ [%-%d%.]+ [%-%d%.]+ (%d+)") == "27380", startMsg)
 
 -- ================================================== position stream parsing
+-- (!) ACKNOWLEDGE BEFORE STREAMING. S|started is written by the same handler
+-- that installs the target (norg_nav.cpp, the START branch), and the first P|
+-- for that target cannot be computed until a later map tick -- so a START the
+-- module actually receives is acknowledged before anything is streamed for it,
+-- and a P| arriving in between was computed for whatever the server was routing
+-- to before. Which is why the addon discards those.
+--
+-- The rule is "acknowledged before streamed", NOT "every START is acknowledged":
+-- a whisper swallowed on the way never produces a reply at all. That is a
+-- different case, and it has its own section further down.
 _G.__facing = 0
+ackStarts()
 reply("P|0.00|0.00|0.00|30.00|412|282|ok")
 
 -- ======================================================= ARROW ROTATION SIGN
@@ -184,6 +268,9 @@ check("arrow points RIGHT for a waypoint to the east",
       a and math.abs(a + 90) < 1, tostring(a) .. " deg, expected -90")
 
 -- ============================================= server reports the boss died
+-- The server acknowledged this subscription before it started streaming, which
+-- is what makes the kill report attributable at all -- see ackStarts.
+ackStarts()
 sent = {}
 reply("S|dead")
 local nextStart = sentMatching("^NORGNAV START ")
@@ -216,6 +303,7 @@ check("/nav debug explains itself before the first position arrives",
       table.concat(chat, " | "))
 
 _G.__facing = 0
+ackStarts()                            -- the server acknowledges before it streams
 reply("P|10.00|20.00|40.00|20.00|150|30|ok")
 sent = {}; chat = {}
 SlashCmdList["NORGNAV"]("debug")
@@ -259,6 +347,7 @@ check("does NOT live-follow the trigger",
       mu and mu:match("START [%-%d%.]+ [%-%d%.]+ [%-%d%.]+ %d+ (%d+)") == "0", mu)
 
 _G.__facing = 0
+ackStarts()                            -- the server acknowledges before it streams
 reply("P|100.00|240.00|110.00|240.00|20|18|ok")
 local labels = {}
 for _, fs in ipairs(fontstrings) do if fs.text then table.insert(labels, fs.text) end end
@@ -446,6 +535,7 @@ sent = {}; chat = {}
 reply("M|43")                                   -- Wailing Caverns
 reply(ALL_ALIVE)
 _G.__facing = 0
+ackStarts()                            -- the server acknowledges before it streams
 reply("P|0.00|0.00|0.00|30.00|412|282|ok")
 texcoord = nil
 reply("P|0.00|0.00|0.00|-30.00|412|282|ok")
@@ -455,6 +545,9 @@ check("harness sanity: a position packet moves the arrow while routing",
 -- (!) AND THE ACK OF OUR OWN START MUST NOT CANCEL IT. A blanket "any S|<word>
 -- clears everything" passes the stopped check below and silently kills every
 -- route the instant it begins -- the server answers S|started to every START.
+-- (Deliberately a SECOND one: the route above is already acknowledged, so this
+-- is the duplicate case, which must also leave a live route alone rather than
+-- cancelling it or shifting the queue.)
 reply("S|started")
 texcoord = nil
 reply("P|0.00|0.00|0.00|30.00|412|282|ok")
@@ -504,6 +597,7 @@ sent = {}; chat = {}
 SlashCmdList["NORGNAV"]("kresh")
 check("harness sanity: the manual pick is actually routing",
       shown and sentMatching("^NORGNAV START ") ~= nil, tostring(lastSent()))
+ackStarts()
 reply("P|0.00|0.00|0.00|30.00|412|282|ok")
 
 sent = {}; chat = {}
@@ -517,6 +611,353 @@ check("and still reports the kill",
 -- (!) Leave the addon in AUTO. An earlier /nav <name> left this file in manual
 -- mode once already and made a later check unreachable, so it passed either way.
 SlashCmdList["NORGNAV"]("auto")
+
+-- ===================================================================================
+-- A KILL REPORT MUST LAND ON THE BOSS THE SERVER WAS WATCHING
+--
+-- (!) The client sees UNIT_DIED instantly and advances itself; the server only
+-- notices on its next world update and only reports on the next nav cadence
+-- (NAV_INTERVAL_MS, norg_nav.cpp), so the report arrives after the arrow has
+-- already moved on. Crediting whatever was current then marked the WRONG boss,
+-- and NOTHING could repair it: the falsely marked boss is across the instance
+-- and unloaded, so the alive poll gets '?' back and clears nothing. Reported
+-- live from Wailing Caverns -- kill Verdan, get told Mutanus is down, then
+-- "every routable boss here is down" with the final fight still ahead.
+-- ===================================================================================
+local wc = NorgNavBosses[43]
+local wcAp
+for _, b in ipairs(wc) do if b.ap then wcAp = b end end
+
+-- Put the addon in a known state: auto mode, Wailing Caverns, every boss alive,
+-- routing to the first one, with the server's acknowledgement delivered.
+local function enterWailing()
+    reply("M|0")
+    SlashCmdList["NORGNAV"]("auto")      -- (!) re-arm auto; AutoRoute is a no-op without it
+    reply("M|43")
+    reply(ALL_ALIVE)
+    ackStarts()
+end
+
+enterWailing()
+local first = sentMatching("^NORGNAV START ")
+check("harness sanity: routing to the first boss, acknowledged by the server",
+      first and first:find(fmt(wc[1].x), 1, true) ~= nil, tostring(first))
+
+sent = {}; chat = {}
+fire("COMBAT_LOG_EVENT_UNFILTERED", 0, "UNIT_DIED", 0, 0, 0, 0, wc[1].n)
+local advanced = sentMatching("^NORGNAV START ")
+check("harness sanity: the combat log advances to the next boss on its own",
+      advanced and advanced:find(fmt(wc[2].x), 1, true) ~= nil, tostring(advanced))
+
+-- The server's report for the boss we just killed, arriving after that advance.
+sent = {}; chat = {}
+reply("S|dead")
+check("a late kill report does not mark the boss that replaced it down",
+      table.concat(chat, " "):find(wc[2].n .. " is down", 1, true) == nil,
+      table.concat(chat, " | "))
+check("and does not yank the arrow off it either",
+      sentMatching("^NORGNAV START ") == nil, tostring(lastSent()))
+
+chat = {}
+SlashCmdList["NORGNAV"]("list")
+local liveLine
+for _, m in ipairs(chat) do if m:find(wc[2].n, 1, true) then liveLine = m end end
+check("and /nav list still shows that boss as alive",
+      liveLine ~= nil and not liveLine:find("(down)", 1, true), tostring(liveLine))
+
+-- The case the whole mechanism exists for still has to work: a boss the bots
+-- killed out of sight, so the report is the ONLY evidence there is.
+enterWailing()
+sent = {}; chat = {}
+reply("S|dead")
+check("a kill the player never saw is still credited to the boss being routed to",
+      table.concat(chat, " "):find(wc[1].n .. " is down", 1, true) ~= nil,
+      table.concat(chat, " | "))
+local onward = sentMatching("^NORGNAV START ")
+check("and it advances to the next boss",
+      onward and onward:find(fmt(wc[2].x), 1, true) ~= nil, tostring(onward))
+
+-- (!) A report we cannot attribute must ASK, not guess. A missed death is
+-- repaired by the next alive poll; a wrong one is not repairable at all.
+reply("M|0")
+SlashCmdList["NORGNAV"]("auto")
+reply("M|43")
+reply(ALL_ALIVE)                       -- routing, but the acknowledgement is withheld
+sent = {}; chat = {}
+reply("S|dead")
+check("an unattributable kill report asks the server instead of guessing",
+      sentMatching("^NORGNAV ALIVE ") ~= nil, table.concat(sent, " | "))
+check("and marks nothing down on a guess",
+      table.concat(chat, " "):find("is down", 1, true) == nil, table.concat(chat, " | "))
+
+-- ===================================================================================
+-- A SKIP IS THE PLAYER'S DECISION AND THE ALIVE POLL MAY NOT OVERRULE IT
+--
+-- (!) Skips used to be stored in `dead`, and the poll is ENTITLED to clear a
+-- death mark -- it has to, or a boss that evaded and hard-reset stays skipped
+-- for the run. So /nav next un-skipped itself the moment the server answered
+-- "that one is alive", dragging the player back to the boss they had just
+-- passed on. The poll is a free-running 20-second accumulator that skipping
+-- does not reset, so it landed anywhere between instantly and 20 seconds later,
+-- and never at all for script-spawned bosses, which are never polled.
+-- ===================================================================================
+enterWailing()
+sent = {}; chat = {}
+SlashCmdList["NORGNAV"]("next")
+ackStarts()
+local afterSkip = sentMatching("^NORGNAV START ")
+check("harness sanity: /nav next moves on to the following boss",
+      afterSkip and afterSkip:find(fmt(wc[2].x), 1, true) ~= nil, tostring(afterSkip))
+
+sent = {}; chat = {}
+tick(21)
+reply(ALL_ALIVE)                       -- the server, truthfully: the skipped boss is alive
+check("the alive poll does not un-skip a boss the player skipped",
+      sentMatching("^NORGNAV START ") == nil, tostring(lastSent()))
+
+-- (!) Deliberately NOT clearing `sent` here. On the broken logic the un-skip
+-- happens on the FIRST poll, after which the arrow is already back on the
+-- skipped boss and later polls have nothing left to change -- so a check that
+-- only looked at the polls after it would pass against the defect.
+for k = 1, 3 do
+    tick(21)
+    reply(ALL_ALIVE)
+end
+check("and it stays skipped over repeated polls",
+      sentMatching("^NORGNAV START ") == nil, tostring(lastSent()))
+
+chat = {}
+SlashCmdList["NORGNAV"]("list")
+local skipLine
+for _, m in ipairs(chat) do if m:find(wc[1].n, 1, true) then skipLine = m end end
+check("/nav list calls it skipped rather than down",
+      skipLine ~= nil and skipLine:find("skipped", 1, true) ~= nil
+        and not skipLine:find("(down)", 1, true), tostring(skipLine))
+
+-- The way back. Without one, a skip is indistinguishable from a lost boss.
+sent = {}; chat = {}
+SlashCmdList["NORGNAV"]("reset")
+local backAgain = sentMatching("^NORGNAV START ")
+check("/nav reset routes to the skipped boss again",
+      backAgain and backAgain:find(fmt(wc[1].x), 1, true) ~= nil, tostring(backAgain))
+check("and says that it did", #chat > 0, table.concat(chat, " | "))
+
+-- Leaving and coming back is the other way out, and the only automatic one.
+enterWailing()
+SlashCmdList["NORGNAV"]("next")
+reply("M|0")
+SlashCmdList["NORGNAV"]("auto")
+sent = {}
+reply("M|43")
+reply(ALL_ALIVE)
+ackStarts()
+local reentered = sentMatching("^NORGNAV START ")
+check("re-entering the instance clears the skip",
+      reentered and reentered:find(fmt(wc[1].x), 1, true) ~= nil, tostring(reentered))
+
+-- ===================================================================================
+-- /nav MUST NEVER ANSWER WITH SILENCE
+--
+-- (!) AutoRoute is quiet whenever it has nothing to change, and the all-clear is
+-- deliberately said once per instance -- so in a cleared (or wrongly-cleared)
+-- instance, /nav printed nothing at all, every time. Reported as "typing /nav
+-- does nothing", which is indistinguishable from a broken addon.
+-- ===================================================================================
+enterWailing()
+chat = {}
+SlashCmdList["NORGNAV"]("")
+check("/nav says what it is doing when it is already on the right boss",
+      #chat > 0, "printed nothing at all")
+
+reply("M|0")
+SlashCmdList["NORGNAV"]("auto")
+reply("M|43")
+local wcDead = {}
+for _, b in ipairs(wc) do
+    if b.g and b.g > 0 then table.insert(wcDead, b.g .. ":0") end
+end
+reply("A|" .. table.concat(wcDead, "|"))
+fire("COMBAT_LOG_EVENT_UNFILTERED", 0, "UNIT_DIED", 0, 0, 0, 0, wcAp.n)
+chat = {}
+SlashCmdList["NORGNAV"]("")
+local silent = table.concat(chat, " | ")
+check("/nav answers when every boss here is already marked down",
+      #chat > 0, "printed nothing at all")
+check("and the answer names the way out of it",
+      silent:find("reset", 1, true) ~= nil, silent)
+
+-- ===================================================================================
+-- ONE LOST ACKNOWLEDGEMENT MUST NOT POISON EVERY LATER KILL
+--
+-- (!) The queue is popped FIFO, so an entry that is never acknowledged sits at
+-- the HEAD of it for ever and every LATER acknowledgement pops the wrong boss.
+-- One dropped START therefore leaves the client permanently one out of step and
+-- credits S|dead to the previous entry for the rest of the session -- the exact
+-- mis-credit the acknowledgement was introduced to eliminate, reintroduced.
+--
+-- It happens for real: ChatHandler.cpp drops a chat line at !CanSpeak() and on
+-- the GM silence aura BEFORE mod-norg-nav's hook runs, so the module never sees
+-- the whisper and never generates a reply. Rare, but silent and permanent.
+--
+-- (!) NO DEPTH CHECK CAN CATCH THIS. With one reply lost the queue oscillates
+-- between one and two and never reaches any threshold -- which is why the fix
+-- is an AGE, and why this test has to let the clock run.
+-- ===================================================================================
+local function killed(name)
+    fire("COMBAT_LOG_EVENT_UNFILTERED", 0, "UNIT_DIED", 0, 0, 0, 0, name)
+end
+-- The whisper was swallowed before the module saw it, so the fake server owes
+-- nothing for it and no acknowledgement will ever arrive.
+local function swallowLastStart() unacked = math.max(0, unacked - 1) end
+
+reply("M|0")
+SlashCmdList["NORGNAV"]("auto")
+reply("M|43")
+reply(ALL_ALIVE)                       -- routes to wc[1]
+swallowLastStart()
+
+sent = {}; chat = {}
+tick(2.5)
+check("notices a START the server never acknowledged and asks it instead",
+      sentMatching("^NORGNAV ALIVE ") ~= nil, table.concat(sent, " | "))
+check("and says so rather than leaving a stale arrow unexplained",
+      table.concat(chat, " "):find("did not answer", 1, true) ~= nil,
+      table.concat(chat, " | "))
+
+-- The reviewer's probe: skip the boss whose acknowledgement was lost, then let
+-- the bots kill the next one. The report must land on the boss that died, not
+-- on the one the player deliberately walked past.
+sent = {}; chat = {}
+SlashCmdList["NORGNAV"]("next")        -- skip wc[1]; START for wc[2]
+ackStarts()                            -- the server acknowledges THAT one
+sent = {}; chat = {}
+reply("S|dead")
+check("a kill after a lost acknowledgement is credited to the boss that died",
+      table.concat(chat, " "):find(wc[2].n .. " is down", 1, true) ~= nil,
+      table.concat(chat, " | "))
+check("and never to the boss the player deliberately skipped",
+      table.concat(chat, " "):find(wc[1].n .. " is down", 1, true) == nil,
+      table.concat(chat, " | "))
+
+chat = {}
+SlashCmdList["NORGNAV"]("list")
+local poisoned
+for _, m in ipairs(chat) do if m:find(wc[1].n, 1, true) then poisoned = m end end
+check("and /nav list still shows the skipped boss as skipped, not down",
+      poisoned ~= nil and not poisoned:find("(down)", 1, true), tostring(poisoned))
+
+-- (!) THE WARNING IS ONCE PER EPISODE, NOT ONCE PER ROUTE -- and proving that
+-- needs TWO expiries. A mute swallows every whisper this addon sends, so a line
+-- per expired request would be a wall of text about one problem. The block above
+-- only ever produces one expiry, so an assertion placed there would hold with
+-- the latch removed entirely; this one drives a second swallowed request.
+enterWailing()                         -- an acknowledged route clears the latch
+SlashCmdList["NORGNAV"]("next")        -- ask for a route ...
+swallowLastStart()                     -- ... whose whisper never reached the module
+chat = {}
+tick(2.5)
+local firstWarned = table.concat(chat, " "):find("did not answer", 1, true) ~= nil
+SlashCmdList["NORGNAV"]("next")        -- and another, swallowed the same way
+swallowLastStart()
+chat = {}
+tick(2.5)
+check("harness sanity: the first swallowed request does warn",
+      firstWarned, "nothing warned at all, so the silence below proves nothing")
+check("a second swallowed request during the same silence does not warn again",
+      table.concat(chat, " "):find("did not answer", 1, true) == nil,
+      table.concat(chat, " | "))
+
+-- (!) The other half of it: the timeout must not throw away a subscription that
+-- WAS acknowledged, or every kill degrades to a poll and the mechanism is
+-- pointless. A slow reply is still a reply.
+--
+-- (!) chat is cleared BEFORE the clock runs here, not between the ticks and the
+-- check. The stale-arrow warning is emitted from OnUpdate, so clearing it
+-- afterwards would throw away the only evidence the second check looks for and
+-- leave an assertion that passes however early the timeout fires.
+enterWailing()
+sent = {}; chat = {}
+SlashCmdList["NORGNAV"]("next")        -- new START, reply a moment behind
+tick(1.5)                              -- inside the timeout
+ackStarts()
+tick(5.0)                              -- and the clock keeps running afterwards
+check("a reply inside the timeout is never warned about as unanswered",
+      table.concat(chat, " "):find("did not answer", 1, true) == nil,
+      table.concat(chat, " | "))
+sent = {}; chat = {}
+reply("S|dead")
+check("a slow but real acknowledgement is not thrown away",
+      table.concat(chat, " "):find(wc[2].n .. " is down", 1, true) ~= nil,
+      table.concat(chat, " | "))
+
+-- ===================================================================================
+-- A POSITION PACKET CARRIES NO ID EITHER, SO IT IS ATTRIBUTED THE SAME WAY
+--
+-- (!) P| is computed for whatever the server is subscribed to, which after our
+-- own auto-advance is still the boss that just died. Painting it under the new
+-- boss's name showed the PREVIOUS route's distance and status as a live figure
+-- for up to one nav cadence. Cosmetic and short-lived, but it is a confident
+-- number about a different boss, which is the one thing this addon must not do.
+-- ===================================================================================
+enterWailing()
+reply("P|0.00|0.00|0.00|30.00|412|282|ok")
+check("harness sanity: the panel is showing the live route",
+      panelText():find("412 yd", 1, true) ~= nil, panelText())
+
+sent = {}; chat = {}
+killed(wc[1].n)                        -- the combat log advances us instantly
+check("names the boss it moved on to before any position has arrived",
+      panelText():find(wc[2].n, 1, true) ~= nil, panelText())
+check("and does not leave the previous route's distance standing under it",
+      panelText():find("412 yd", 1, true) == nil, panelText())
+
+-- Sent before the server acknowledged the new START, so it was computed for the
+-- boss that just died.
+reply("P|0.00|0.00|0.00|30.00|999|888|ok")
+check("a position packet from before the acknowledgement is not painted",
+      panelText():find("999 yd", 1, true) == nil, panelText())
+
+ackStarts()
+reply("P|0.00|0.00|0.00|30.00|777|666|ok")
+check("and the stream is taken up again the moment the server acknowledges",
+      panelText():find("777 yd", 1, true) ~= nil, panelText())
+
+-- ===================================================================================
+-- "%d down, %d skipped" MUST NOT ADD UP TO MORE BOSSES THAN THERE ARE
+--
+-- (!) A boss can be in BOTH sets -- skip it and the bots kill it anyway -- and
+-- the two counts were independent loops, so the accounting lines could total
+-- more than the instance holds. Same arithmetic trap CountRemaining is written
+-- the way it is to avoid; `dead` wins, exactly as /nav list already displays it.
+-- ===================================================================================
+enterWailing()
+SlashCmdList["NORGNAV"]("next")        -- skip wc[1]
+SlashCmdList["NORGNAV"]("next")        -- and wc[2]
+chat = {}
+killed(wc[1].n)                        -- the bots kill a skipped one anyway
+for k = 3, #wc do killed(wc[k].n) end  -- and everything else
+SlashCmdList["NORGNAV"]("")
+
+local accounted, overcounted = 0, nil
+for _, m in ipairs(chat) do
+    local d, s = m:match("(%d+) down, (%d+) skipped")
+    if d then
+        accounted = accounted + 1
+        if tonumber(d) + tonumber(s) > #wc then overcounted = m end
+    end
+end
+check("harness sanity: an accounting line was printed at all",
+      accounted > 0, table.concat(chat, " | "))
+check("no accounting line claims more bosses than the instance has",
+      overcounted == nil, tostring(overcounted) .. "  (of " .. #wc .. " bosses)")
+
+chat = {}
+SlashCmdList["NORGNAV"]("list")
+local bothMarks
+for _, m in ipairs(chat) do if m:find(wc[1].n, 1, true) then bothMarks = m end end
+check("a boss that was skipped and then killed is listed once, as down",
+      bothMarks ~= nil and bothMarks:find("(down)", 1, true) ~= nil
+        and not bothMarks:find("skipped", 1, true), tostring(bothMarks))
 
 print(string.format("\n  ==== %d passed, %d failed ====", pass, fail))
 os.exit(fail == 0 and 0 or 1)

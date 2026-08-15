@@ -12,14 +12,14 @@ copy than this table describes.
 
 | Addon | Version | Command | What it does |
 |---|---|---|---|
-| **NorgQuest** | 1.12 | `/quest` | Quest arrow that follows a real path, draws the route on the world map, and routes across continents by boat and zeppelin |
-| **NorgNav** | 2.7 | `/nav` | Arrow to the next boss in a dungeon, with real pathing rather than a straight bearing |
-| **NorgHearth** | 1.0 | `/hs` | Save up to eight innkeeper binds and pick which one the hearthstone sends you to |
-| **NorgAHValue** | 1.5 | `/ahprice` | Fills the auction sell slot at the highest price the server's auction-house bot will actually pay |
-| **NorgMail** | 1.5 | `/mail` | Empties the mailbox from one button, skipping C.O.D. and GM mail |
-| **NorgDungeons** | 1.0 | `/dungeon` | 101 dungeon and raid maps with the server's real boss order, a marker legend, and bosses greying out as you kill them |
-| **NorgOneBag** | 1.0 | `/onebag` | Single-bag inventory view |
-| **NorgRoutes** | 1.0 | `/route` | Boss order for 69 instances, with the compass bearing and distance from each boss to the next |
+| **NorgQuest** | 1.13 | `/quest` | Quest arrow that follows a real path, draws the route on the world map, and routes across continents by boat and zeppelin |
+| **NorgNav** | 2.8 | `/nav` | Arrow to the next boss in a dungeon, with real pathing rather than a straight bearing |
+| **NorgHearth** | 1.1 | `/hs` | Save up to eight innkeeper binds and pick which one the hearthstone sends you to |
+| **NorgAHValue** | 1.6 | `/ahprice` | Fills the auction sell slot at the highest price the server's auction-house bot will actually pay |
+| **NorgMail** | 1.6 | `/mail` | Empties the mailbox from one button, skipping C.O.D. and GM mail |
+| **NorgDungeons** | 1.1 | `/dungeon` | 101 dungeon and raid maps with the server's real boss order, a marker legend, and bosses greying out as you kill them |
+| **NorgOneBag** | 1.1 | `/onebag` | Single-bag inventory view |
+| **NorgRoutes** | 1.1 | `/route` | Boss order for 69 instances, with the compass bearing and distance from each boss to the next |
 
 ## Install
 

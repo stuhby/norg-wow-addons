@@ -57,11 +57,42 @@ local KIND_WORD = {
     -- mine. The arrow was always right; only the caption lied, which is worse
     -- than saying nothing because the player goes looking for the NPC.
     a = "explore",
+    -- (!) 'v' EXISTS SO THE PANEL STOPS SAYING "kill" ABOUT A SHOPKEEPER. The
+    -- server resolves a vendor through the ordinary creature spawn index, so a
+    -- bought item and a dropped one arrive here looking identical apart from
+    -- this letter -- without it the quest reads "collect Rugged Leather" beside
+    -- an arrow pointing at a trade goods merchant.
+    v = "buy",
+    -- (!) 'p' IS AN OUTLINE ON THE MAP, NOT A TARGET, AND THE WORDING IS THE
+    -- POINT. It is one of the server's two last resorts: Blizzard's own quest
+    -- marker, used only when nothing in the world could be resolved. It has no
+    -- entry, nobody stands in it, and this shape of it is a region the designer
+    -- sketched -- so it must never read as an instruction to reach an exact spot.
+    -- "search this area" is what the server actually knows. Anything that names
+    -- somebody here is wrong by construction: see the second lock in Refresh.
+    p = "search this area",
+    -- (!) 'm' IS THE SAME KIND OF MARKER DRAWN AS A SINGLE POINT, AND IT IS THE
+    -- COMMON ONE. The server used to send both shapes as 'p', so a marker that
+    -- was one exact coordinate told the player to go and hunt around -- an
+    -- instruction to wander over an answer they had already been given.
+    --
+    -- Spelled the same as the fallback ON PURPOSE, exactly like 'e': an addon
+    -- that predates this letter renders KIND_WORD[k] or "go to" and therefore
+    -- already says the right thing. That is why the SERVER kept 'p' for the
+    -- outline and gave the new letter to the point, rather than the reverse.
+    --
+    -- (!) IT IS PRECISE, NOT POPULATED. There is still nobody standing there and
+    -- still no entry to name, so 'm' needs every anti-naming lock 'p' has. Miss
+    -- one and the Fargodeep Mine caption comes back for most markers.
+    m = "go to",
 }
 
 local frame, arrow, nameFS, distFS, hintFS
 
 local objectives = {}     -- [questId] = { kind, x, y, dist, sameMap }
+-- [questId] = true once we have told the player that quest does not exist on
+-- this server. Deliberately NOT cleared by a rescan -- see the X| handler.
+local reportedUnknown = {}
 local tracked             -- questId we asked the server to route to
 -- (!) Declared local. Without these two lines they become GLOBALS, which works
 -- in Lua and quietly pollutes the shared namespace every addon sees.
@@ -110,6 +141,16 @@ local SWITCH_MIN_YARDS = 400
 local legText                -- e.g. "take Zeppelin (The Thundercaller)"
 local targetName             -- WHO or WHAT is at the objective, from the server
 local targetType             -- "c" creature, "g" gameobject, "a" a place (no name)
+-- (!) WHAT the player is looking for when they arrive, in the quest's own words,
+-- sent only for a map marker. A marker gives a place and nothing else, so without
+-- this the panel can say "go to" beside an arrow and still leave the player
+-- standing on a hillside wondering what they came for. Declared here with the
+-- others because a bare assignment in OnQuestMessage would make it a GLOBAL.
+--
+-- (!) IT IS PER-QUEST STATE AND MUST BE CLEARED THE MOMENT THE PICK CHANGES --
+-- see Track. Text left over from the previous quest is the same failure as a name
+-- left over from it: a confident instruction about the wrong objective.
+local targetObjective
 local subscribed = false     -- is the server actually streaming to us now
 local autoMode = true
 local scanAt = 0
@@ -222,12 +263,25 @@ local function Refresh()
         -- bare kind word whenever the server sent no name, which is normal for an
         -- objective that is a PLACE rather than a thing (an area to explore).
         local what = KIND_WORD[o.kind] or "go to"
-        -- (!) NEVER NAME ANYBODY ON AN AREATRIGGER OBJECTIVE. targetType "a" means
-        -- the destination is a PLACE; there is nothing standing there to talk to,
-        -- so any name that reaches us for one is wrong by construction. The server
-        -- already sends an empty name for these -- this is the second lock, because
-        -- the failure mode is a confidently wrong instruction rather than a blank.
-        if targetName and targetType ~= "a" then
+        -- (!) NEVER NAME ANYBODY ON A PLACE. targetType "a" means the destination
+        -- is a PLACE -- an areatrigger, or the server's map-marker fallback --
+        -- and there is nothing standing there to talk to, so any name that
+        -- reaches us for one is wrong by construction. The server already sends
+        -- an empty name for these; this is the second lock, because the failure
+        -- mode is a confidently wrong instruction rather than a blank.
+        --
+        -- (!) THE kind == "p" HALF IS A THIRD LOCK AND IS NOT REDUNDANT. It
+        -- catches the case where the letter and the name arrive from different
+        -- places: targetName survives from whatever was tracked a moment ago if
+        -- a G| for the new quest has not landed yet, and a map marker captioned
+        -- with the last objective's NPC is exactly the Fargodeep Mine bug in a
+        -- new disguise -- a real person, nowhere near where the arrow points.
+        --
+        -- (!) "m" MUST BE LISTED BESIDE "p" HERE. It is the same map marker drawn
+        -- as one point instead of several -- exact, but still with nobody in it --
+        -- and it is the MAJORITY of markers, so omitting it would not be a corner
+        -- case: it would re-open the Fargodeep caption for most of them.
+        if targetName and targetType ~= "a" and o.kind ~= "p" and o.kind ~= "m" then
             if targetType == "g" then
                 what = "use " .. targetName
             elseif o.kind == "k" then
@@ -236,9 +290,34 @@ local function Refresh()
                 what = "turn in to " .. targetName
             elseif o.kind == "i" then
                 what = "loot from " .. targetName
+            elseif o.kind == "v" then
+                what = "buy from " .. targetName
             else
                 what = "talk to " .. targetName
             end
+        end
+        -- (!) A PLACE WITHOUT A PURPOSE IS HALF AN INSTRUCTION. "go to" beside an
+        -- arrow is the same complaint as "go to" beside a name-less NPC: the
+        -- player knows where and not what. The server sends the objective's own
+        -- wording for a marker, so say it.
+        --
+        -- (!) APPENDED, NEVER SUBSTITUTED. The kind word is what CHANGE ONE is
+        -- for -- it is the only thing that distinguishes a spot to walk to from a
+        -- region to sweep -- so dropping it in favour of the text would undo the
+        -- other half of this feature. It is also normal for there to be no text
+        -- at all (most quests carry none, and a marker chosen for the quest as a
+        -- whole has no single objective to quote), and the caption must read
+        -- correctly in that case without a dangling separator.
+        --
+        -- (!) GATED ON THE MARKER KINDS, NOT PRINTED WHENEVER IT IS SET. The text
+        -- describes the objective the SERVER could not place, and it arrives once
+        -- per route while the Q| kind is refreshed every few seconds -- so in
+        -- manual mode, where AutoTrack does not re-pick and Track therefore never
+        -- runs to clear it, a quest whose objective becomes locatable flips to
+        -- 'k' or 'i' while this string stays behind. Tying it to the letter it was
+        -- sent for means it can only ever caption what it was written about.
+        if targetObjective and (o.kind == "m" or o.kind == "p") then
+            what = what .. " -- " .. targetObjective
         end
         nameFS:SetText(string.format("%s |cff808080(%s)|r", title, what))
     else
@@ -277,6 +356,9 @@ local function Track(questId)
     -- worse than saying nothing -- a confidently wrong name gets acted on.
     targetName = nil
     targetType = nil
+    -- Same reason, same instant: the objective TEXT is per-quest too, and holding
+    -- it would caption the new objective with what the last one was looking for.
+    targetObjective = nil
     local o = objectives[questId]
     trackedKind = o and o.kind or nil
     trackedX = o and o.x or nil
@@ -486,17 +568,53 @@ local function OnQuestMessage(msg)
         return
     end
 
-    -- G|<questId>|<c|g|a>|<name> -- the server routed us, and says what is there.
-    -- The type letter is NOT the objective kind: 'c' creature, 'g' gameobject,
-    -- 'a' a PLACE, which carries an empty name because there is nobody standing
-    -- in it (see KIND_WORD and the second lock in Refresh). 'a' was added to the
-    -- server and to the declaration at the top of this file but not to this line,
-    -- which is how a reader ends up believing an areatrigger target is impossible.
+    -- G|<questId>|<c|g|a>|<name>[|<objective text>] -- the server routed us, and
+    -- says what is there. The type letter is NOT the objective kind: 'c'
+    -- creature, 'g' gameobject, 'a' a PLACE, which carries an empty name because
+    -- there is nobody standing in it (see KIND_WORD and the second lock in
+    -- Refresh). 'a' was added to the server and to the declaration at the top of
+    -- this file but not to this line, which is how a reader ends up believing an
+    -- areatrigger target is impossible.
+    --
+    -- (!) THE NAME IS MATCHED AS "([^|]*)", NOT "(.*)", AND THAT IS THE WHOLE
+    -- PARSER CHANGE. The old pattern was greedy to the end of the line, so the
+    -- moment a fifth field existed it would have been swallowed into the name --
+    -- and since a marker sends an EMPTY name, the name would have become the
+    -- objective text with a leading pipe, i.e. a caption. The server strips '|'
+    -- from both fields, so a bounded match is exact rather than merely careful.
+    --
+    -- (!) THE FIFTH FIELD IS OPTIONAL AND ITS ABSENCE IS THE COMMON CASE. "|?"
+    -- makes one pattern read BOTH the four-field form this addon has always
+    -- received and the five-field one, so nothing has to know which server it is
+    -- talking to. An absent field yields "", which is the same nil-out as an
+    -- empty one -- there is no third state to get wrong.
     if kind == "G" then
-        local id, typ, nm = msg:match("^G|(%d+)|(%a)|(.*)$")
+        local id, typ, nm, obj = msg:match("^G|(%d+)|(%a)|([^|]*)|?(.*)$")
         if id and tonumber(id) == tracked then
             targetType = typ
             targetName = (nm and nm ~= "") and nm or nil
+            targetObjective = (obj and obj ~= "") and obj or nil
+        end
+        return
+    end
+
+    -- X|<id>|<id>|... -- these quests are in your log but not in this server's
+    -- quest_template, so there is no objective, no ender and no map marker to
+    -- point at. Nothing else in this protocol can express that: a missing quest
+    -- simply never appeared in Q|, which is indistinguishable from the addon
+    -- being broken.
+    --
+    -- (!) SAID ONCE PER ID, NOT ONCE PER SCAN. A scan runs every few seconds and
+    -- this fact can never change while the player is logged in, so without the
+    -- seen table it would be a chat line every RESCAN_SECS forever.
+    if kind == "X" then
+        for id in msg:gmatch("(%d+)") do
+            id = tonumber(id)
+            if id and not reportedUnknown[id] then
+                reportedUnknown[id] = true
+                Say("quest #" .. id .. " is in your log but not on this server -- "
+                    .. "nothing to point at. Abandon it if it bothers you.")
+            end
         end
         return
     end

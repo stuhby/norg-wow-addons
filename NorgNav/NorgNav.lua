@@ -130,6 +130,14 @@ local lastStatus = "ok"
 local haveFix = false
 local px, py, wx, wy = 0, 0, 0, 0
 local routeYd, lineYd = 0, 0
+-- The current LEG instruction, e.g. "take the front lift up to the top of
+-- Thunder Bluff". Empty whenever the whole trip is a plain walk.
+--
+-- (!) THIS EXISTS BECAUSE AN ARROW ALONE CANNOT EXPRESS A LIFT. The route to a
+-- Thunder Bluff mesa is a walk to the boarding deck and then a ride, and the
+-- arrow for the first half points at the deck -- which, without a caption,
+-- reads as the arrow simply stopping short of where you asked to go.
+local legText = ""
 local saidAllDone = false   -- so the all-clear is announced once, not every poll
 local whereRetry = 0
 local aliveRetry = 0
@@ -278,6 +286,16 @@ local function Refresh()
         hint = target.t ~= "" and target.t or "walk here to trigger the encounter"
     end
 
+    -- (!) A LEG OUTRANKS EVERYTHING ELSE ON THIS LINE, including the approach
+    -- note. Both explain why the arrow is not pointing at the destination, but
+    -- only one of them is an instruction: the approach note describes the last
+    -- few yards, the leg is the thing you have to do NEXT and stops being true
+    -- the moment you have done it. Showing the note instead would leave the
+    -- player standing on the boarding deck reading about the boss's room.
+    if legText ~= "" then
+        hint = legText
+    end
+
     hintFS:SetText(hint or "")
 end
 
@@ -286,6 +304,7 @@ end
 local function StopNav(silent)
     target = nil
     haveFix = false
+    legText = ""
     Send("STOP")
     if frame then frame:Hide() end
     if not silent then Say("stopped. /nav to resume.") end
@@ -324,6 +343,11 @@ local function ShowUnroutable(b)
 end
 
 local function StartNav(b)
+    -- (!) CLEAR THE LEG BEFORE THE BRANCH, not after it. A leg belongs to the
+    -- route that was running, and this one is over; leaving it set would caption
+    -- the NEXT route with the previous route lift instruction until the server
+    -- happened to send a different one.
+    legText = ""
     if b.nr then
         ShowUnroutable(b)
         return
@@ -575,6 +599,20 @@ local function OnAddonMessage(msg)
         routeYd, lineYd = tonumber(e) or 0, tonumber(f) or 0
         lastStatus = st
         haveFix = true
+        Refresh()
+        return
+    end
+
+    if kind == "L" then
+        -- L|<text>, and a BARE "L|" is a clear, not a malformed packet.
+        --
+        -- (!) THE CLEAR IS THE HALF THAT MATTERS. The server only transmits this
+        -- line when it changes, so the transition from "take the front lift up
+        -- to the top of Thunder Bluff" back to plain walking arrives as an empty
+        -- payload. Treating that as junk and returning early would leave the
+        -- instruction on screen for the rest of the run, telling the player to
+        -- board a lift they are already standing on top of.
+        legText = msg:match("^L|(.*)$") or ""
         Refresh()
         return
     end

@@ -62,6 +62,17 @@ WHAT THE COLOURS AND WORDING MEAN
       the addon has never printed and a meaning it deliberately avoids -- people
       read it as "you cannot get there" and gave up on bosses they could reach.)
 
+  "take the front lift up to the top of Thunder Bluff" (or any other leg)
+      The route needs something that is not walking, and the arrow is pointing at
+      the thing you have to use rather than at the destination. Lifts are the case
+      you will meet: a lift is a moving platform, so it is not part of the
+      server's map of walkable ground, and the places one serves -- the Thunder
+      Bluff mesas, for instance -- have no walking route to them at all.
+
+      Walk to the arrow, ride it, and the line clears and the route carries on by
+      itself. The distance shown while the line is up is the real walking distance
+      to the boarding point, not to the boss.
+
   Grey arrow, "..." and "finding a route"
       The route has been requested and the server has not answered yet. The boss
       name is already the new one; the distance is deliberately blank rather than

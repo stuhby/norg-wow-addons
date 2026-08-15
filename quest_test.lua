@@ -463,6 +463,215 @@ quest("Q|1144:t:100:100:15:1|2006:k:50:50:5:1")
 quest("E|2")
 check("hands the arrow on once a completed escort becomes a turn-in",
       sentMatching("^NORGQUEST GO ") == "NORGQUEST GO 2006", tostring(lastSent()))
+-- ================================= a map marker: a PIN is not a REGION
+-- (!) BOTH SHAPES USED TO ARRIVE AS 'p' AND BOTH READ "search this area". On this
+-- world the majority of markers that actually reach the fallback are ONE point --
+-- an exact coordinate -- so the panel was telling players to go and hunt around
+-- over an answer the server had already given them precisely. 'm' is that pin and
+-- 'p' is now only the multi-point outline.
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+quest("Q|8490:m:8282:-7216:792:1")
+quest("E|1")
+quest("G|8490|a||Runestone Energized")
+nav("P|0.00|0.00|0.00|30.00|412|282|ok")
+tick(0.2)
+check("a single-point marker reads as somewhere to GO, not an area to sweep",
+      panelText():find("go to") ~= nil
+      and panelText():find("search this area") == nil, panelText())
+
+-- (!) THE OTHER HALF. An outline really IS a region and must keep the old
+-- wording, or this change would simply move the wrong caption onto the 'p' cases
+-- instead of removing it.
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+quest("Q|9303:p:-4484:-13651:1025:1")
+quest("E|1")
+quest("G|9303|a||Nestlewood Owlkin inoculated")
+nav("P|0.00|0.00|0.00|30.00|412|282|ok")
+tick(0.2)
+check("a multi-point marker still reads as an area to search",
+      panelText():find("search this area") ~= nil, panelText())
+
+-- ====================================== a marker says WHAT you are looking for
+-- (!) A LOCATION WITHOUT A PURPOSE IS HALF AN INSTRUCTION. The arrow was right
+-- and the player still arrived at a hillside with nothing to act on. The server
+-- now sends the quest's own wording for the objective it could not place.
+check("...and says what the player is looking for when they arrive",
+      panelText():find("Nestlewood Owlkin inoculated") ~= nil, panelText())
+
+-- (!) THE KIND WORD MUST SURVIVE THE TEXT. Substituting the objective text for
+-- the kind would silently undo the pin/outline split above -- the caption would
+-- read the same for both shapes again.
+check("the objective text is APPENDED to the kind word, not swapped for it",
+      panelText():find("search this area %-%- Nestlewood Owlkin inoculated") ~= nil,
+      panelText())
+
+-- ===================================== an empty objective text shifts NOTHING
+-- (!) MOST QUESTS CARRY NO ObjectiveText, and a marker chosen for the quest as a
+-- whole has no single objective to quote either -- so ABSENT is the common case,
+-- not the edge one. The server omits the field entirely, which makes the message
+-- byte-identical to the four-field form this addon has always received. If the
+-- parser mis-handled that, the NAME field would absorb the difference and every
+-- later field would move by one.
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+quest("Q|118:m:-9457:88:12215:1")
+quest("E|1")
+quest("G|118|a|")                       -- four fields, exactly as before
+nav("P|0.00|0.00|0.00|30.00|412|282|ok")
+tick(0.2)
+check("an absent objective text leaves a clean caption",
+      panelText():find("go to") ~= nil
+      and panelText():find(" %-%- ") == nil, panelText())
+
+-- The five-field form with an EMPTY fifth field must behave identically. A
+-- trailing separator is the other way this arrives and must not print a dangling
+-- "--" either.
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+quest("Q|119:m:-9457:88:12215:1")
+quest("E|1")
+quest("G|119|a||")                      -- five fields, the last one empty
+nav("P|0.00|0.00|0.00|30.00|412|282|ok")
+tick(0.2)
+check("an EMPTY objective text field is the same as no field at all",
+      panelText():find("go to") ~= nil
+      and panelText():find(" %-%- ") == nil, panelText())
+
+-- (!) THE OLD FOUR-FIELD FORM STILL HAS TO PARSE FOR A NAMED TARGET. The name
+-- match was tightened from "(.*)" to "([^|]*)" so a fifth field could exist; get
+-- that wrong and every creature caption in the addon breaks at once, which is a
+-- far bigger blast radius than the feature being added.
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+quest("Q|6981:e:100:200:50:1")
+quest("E|1")
+quest("G|6981|c|Sputtervalve")
+nav("P|0.00|0.00|0.00|30.00|412|282|ok")
+tick(0.2)
+check("a four-field G| still names a creature",
+      panelText():find("talk to Sputtervalve") ~= nil, panelText())
+
+-- ==================================== a pin is PRECISE, but still has NOBODY in it
+-- (!) THE FOURTH LOCK. 'm' is exact, which makes it tempting to treat as a
+-- target -- but there is no entry behind it, so any name that reaches the client
+-- for one is wrong by construction. This is the Fargodeep Mine bug aimed at the
+-- MAJORITY of markers rather than a corner of them.
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+quest("Q|8490:m:8282:-7216:792:1")
+quest("E|1")
+quest("G|8490|a|Gug Fatcandle|Runestone Energized")
+nav("P|0.00|0.00|0.00|30.00|412|282|ok")
+tick(0.2)
+check("refuses a name sent for a single-point marker",
+      panelText():find("Gug Fatcandle") == nil, panelText())
+check("...while still showing what to look for there",
+      panelText():find("Runestone Energized") ~= nil, panelText())
+
+-- (!) THE CASE ABOVE IS ALREADY CAUGHT BY THE targetType == "a" CLAUSE, so it
+-- does NOT exercise the kind lock at all -- a copy of this file with the 'm' half
+-- of that lock deleted passes it. This is the shape that genuinely needs it, and
+-- it is the one the 'p' lock was written for in the first place: the LETTER and
+-- the NAME arrive from different places and can disagree.
+--
+-- In MANUAL mode AutoTrack returns before re-picking, so Track never runs and
+-- never clears the name -- while Q| keeps refreshing the kind underneath it. A
+-- creature name captured when the objective was locatable therefore survives into
+-- a marker, and captioning a hand-drawn map pin with a real NPC is precisely the
+-- Fargodeep Mine bug: a person who exists, nowhere near where the arrow points.
+local function staleNameOverMarker(markerKind)
+    SlashCmdList["NORGQUEST"]("")
+    SlashCmdList["NORGQUEST"]("scan")
+    quest("Q|806:k:100:100:50:1")
+    quest("E|1")
+    SlashCmdList["NORGQUEST"]("vile")          -- manual: AutoTrack stops re-picking
+    -- (!) A NAME THAT IS NOT A SUBSTRING OF THE QUEST TITLE. The panel prints the
+    -- title too, so asserting on "Vile Familiar" against quest "Vile Familiars"
+    -- matches the title and fails whatever the caption says.
+    quest("G|806|c|Gug Fatcandle")             -- a real creature, with a real name
+    quest("Q|806:" .. markerKind .. ":100:100:50:1")   -- kind flips under it
+    quest("E|1")
+    nav("P|0.00|0.00|0.00|30.00|412|282|ok")
+    tick(0.2)
+    return panelText()
+end
+
+local mText = staleNameOverMarker("m")
+check("a stale creature name never captions a single-point marker",
+      mText:find("Gug Fatcandle") == nil and mText:find("go to") ~= nil, mText)
+
+local pText = staleNameOverMarker("p")
+check("...nor an outline, which is the same lock one letter over",
+      pText:find("Gug Fatcandle") == nil
+      and pText:find("search this area") ~= nil, pText)
+
+-- ============================== objective text must not outlive its own quest
+-- (!) SAME FAILURE AS A STALE NAME, AND IT WAS ALREADY PROVEN TO MATTER FOR ONE.
+-- Text left over from the previous pick is a confident instruction about the
+-- wrong objective.
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+quest("Q|9303:p:-4484:-13651:1025:1")
+quest("E|1")
+quest("G|9303|a||Nestlewood Owlkin inoculated")
+nav("P|0.00|0.00|0.00|30.00|412|282|ok")
+tick(0.2)
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+quest("Q|9678:m:8033:-7525:400:1")
+quest("E|1")
+nav("P|0.00|0.00|0.00|30.00|412|282|ok")
+tick(0.2)
+check("a stale objective text is cleared on a new pick",
+      panelText():find("Nestlewood") == nil, panelText())
+
+-- (!) AND IT IS TIED TO THE MARKER LETTER IT WAS SENT FOR. In manual mode
+-- AutoTrack never re-picks, so Track never runs to clear this -- yet the Q| kind
+-- keeps refreshing. A quest whose objective becomes locatable flips to 'k' while
+-- the text stays behind, and captioning a named kill with a marker's text is the
+-- same class of confidently-wrong instruction.
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+quest("Q|9303:p:-4484:-13651:1025:1")
+quest("E|1")
+quest("G|9303|a||Nestlewood Owlkin inoculated")
+nav("P|0.00|0.00|0.00|30.00|412|282|ok")
+tick(0.2)
+quest("Q|9303:k:-4484:-13651:1025:1")   -- same quest, now locatable
+nav("P|0.00|0.00|0.00|30.00|412|282|ok")
+tick(0.2)
+check("marker text is dropped once the objective stops being a marker",
+      panelText():find("Nestlewood") == nil, panelText())
+
+-- ================================ an unknown kind still degrades to "go to"
+-- (!) THE REASON 'm' IS THE NEW LETTER AND 'p' KEPT THE OLD ONE. A copy of this
+-- addon that predates a letter renders KIND_WORD[k] or "go to" -- which is
+-- exactly the wording a pin wants, so the majority of markers read correctly even
+-- on a client that has never heard of 'm'. This pins the fallback itself.
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+quest("Q|9999:Z:100:100:50:1")
+quest("E|1")
+quest("G|9999|a|")
+nav("P|0.00|0.00|0.00|30.00|412|282|ok")
+tick(0.2)
+check("an unrecognised kind letter still renders a sensible word",
+      panelText():find("go to") ~= nil, panelText())
+
+-- ==================================== /quest list knows about both marker kinds
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+quest("Q|8490:m:8282:-7216:792:1|9303:p:-4484:-13651:1025:1")
+quest("E|2")
+chat = {}
+SlashCmdList["NORGQUEST"]("list")
+local listed = table.concat(chat, " | ")
+check("/quest list distinguishes a pin from an area",
+      listed:find("go to", 1, true) ~= nil
+      and listed:find("search this area", 1, true) ~= nil, listed)
+
 -- =================================================================== garbage
 local ok = pcall(function()
     quest("Q|")
@@ -471,6 +680,13 @@ local ok = pcall(function()
     quest("")
     nav("P|bad")
     nav("")
+    -- Truncated and over-full G| frames. The name match is now bounded, so a
+    -- frame with no name field at all, or with more separators than fields, must
+    -- still fall out rather than throwing inside the parser.
+    quest("G|")
+    quest("G|8490")
+    quest("G|8490|a")
+    quest("G|8490|a|||")
 end)
 check("survives malformed server messages", ok)
 

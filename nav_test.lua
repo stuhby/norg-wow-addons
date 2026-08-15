@@ -959,5 +959,77 @@ check("a boss that was skipped and then killed is listed once, as down",
       bothMarks ~= nil and bothMarks:find("(down)", 1, true) ~= nil
         and not bothMarks:find("skipped", 1, true), tostring(bothMarks))
 
+-- ===================================================================================
+-- LEG LINES -- the caption for a route the arrow cannot express on its own
+--
+-- (!) A LIFT IS NOT A DISTANCE. Thunder Bluff's mesas are a separate navmesh island
+-- joined to the ground only by a type-11 transport, which is not in the navmesh at
+-- all. The server therefore routes to the BOARDING DECK and captions the ride on the
+-- L| channel. Without the caption the arrow simply stops at the foot of the bluff for
+-- no stated reason -- which is the shape of the original bug, not a fix for it.
+--
+-- (!) NorgNav ignored L| entirely before this. NorgQuest owns the other prefix and
+-- rendered its own legs, so nothing here failed loudly; the instruction was received
+-- and dropped on the floor.
+-- ===================================================================================
+enterWailing()
+reply("P|0.00|0.00|0.00|30.00|412|282|ok")
+check("harness sanity: a plain walking route carries no leg caption",
+      panelText():find("lift", 1, true) == nil, panelText())
+
+local LEG = "take the front lift up to the top of Thunder Bluff"
+reply("L|" .. LEG)
+check("a leg line reaches the player rather than being discarded",
+      panelText():find(LEG, 1, true) ~= nil, panelText())
+
+reply("P|0.00|0.00|0.00|30.00|400|280|ok")
+check("and it survives the position packets that repaint the panel",
+      panelText():find(LEG, 1, true) ~= nil, panelText())
+
+-- (!) THE CLEAR IS THE HALF THAT GETS FORGOTTEN. L| is only transmitted when it
+-- CHANGES, so stepping off the lift and going back to plain walking arrives as an
+-- EMPTY payload. Treating that as a malformed packet leaves the instruction on screen
+-- telling the player to board a lift they are standing on top of.
+reply("L|")
+reply("P|0.00|0.00|0.00|30.00|390|275|ok")
+check("an EMPTY leg line clears the caption instead of being ignored",
+      panelText():find(LEG, 1, true) == nil, panelText())
+
+reply("P|0.00|0.00|0.00|30.00|390|275|far")
+check("harness sanity: without a leg, the routing status explains itself",
+      panelText():find("routing as far as I can see", 1, true) ~= nil, panelText())
+reply("L|" .. LEG)
+check("a leg outranks the routing-status hint on that line",
+      panelText():find(LEG, 1, true) ~= nil
+        and panelText():find("routing as far as I can see", 1, true) == nil, panelText())
+
+-- (!) AND OVER THE APPROACH NOTE, which is the one that had to be argued. Both
+-- explain why the arrow is not pointing at the boss, but only the leg is an
+-- INSTRUCTION, and it stops being true the moment it is obeyed. Losing to the note
+-- would leave the player standing on the boarding deck reading about the boss room.
+sent = {}; chat = {}
+SlashCmdList["NORGNAV"]("mutanus")
+ackStarts()
+
+-- (!) ASSERT AFTER A REFRESH, NOT THE INSTANT THE SLASH COMMAND RETURNS.
+-- legText is only ever RENDERED by Refresh, and Refresh only runs when a P| line
+-- arrives. StartNav repaints the hint with its own "finding a route" line on the
+-- way past, so at that instant the panel does not contain the old leg NO MATTER
+-- WHAT legText holds -- which is why this assertion still passed with the
+-- `legText = ""` deleted from StartNav: it was testing the repaint, not the
+-- clearing. One P| line later the two are distinguishable, because a surviving
+-- leg outranks every other hint and would therefore be the line on screen.
+reply("P|100.00|240.00|110.00|240.00|20|18|ok")
+check("starting a new route clears the previous route's leg",
+      panelText():find(LEG, 1, true) == nil, panelText())
+
+local apNote
+for _, b in ipairs(NorgNavBosses[43]) do if b.ap then apNote = b.t end end
+check("harness sanity: the approach note is what shows when there is no leg",
+      apNote and panelText():find(apNote, 1, true) ~= nil, panelText())
+reply("L|" .. LEG)
+check("a leg outranks even the approach note",
+      panelText():find(LEG, 1, true) ~= nil
+        and panelText():find(apNote, 1, true) == nil, panelText())
 print(string.format("\n  ==== %d passed, %d failed ====", pass, fail))
 os.exit(fail == 0 and 0 or 1)

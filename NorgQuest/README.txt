@@ -1,4 +1,4 @@
-NorgQuest 1.12 -- points you at the nearest quest objective you can actually do
+NorgQuest 1.13 -- points you at the nearest quest objective you can actually do
 ==============================================================================
 
 INSTALL
@@ -81,6 +81,20 @@ WHAT THE WORDING MEANS
                                 there to interact with -- walk into it and the
                                 objective completes on its own. No name is shown
                                 because there is nobody to name.
+    "go to"                     the server could not find the thing itself, so it
+                                is sending you to the exact spot Blizzard's own
+                                quest marker names. Nobody is standing there, so
+                                there is no name -- but it IS one point, not a
+                                region, so walk to it rather than sweeping around.
+    "search this area"          the same map marker, but drawn as a REGION rather
+                                than a single point. The arrow aims at the nearest
+                                corner of it; expect to look around once you get
+                                there. This is the vaguest answer the addon gives.
+
+    Either of the last two may be followed by "-- <text>", which is the quest's
+    own wording for the objective the server could not place. It is what you are
+    looking for when you arrive. Many quests do not carry one, and then nothing
+    is shown after the kind.
 
 
 WHAT IT DELIBERATELY WILL NOT DO

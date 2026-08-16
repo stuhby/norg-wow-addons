@@ -297,6 +297,28 @@ local said = table.concat(chat, " | ")
 check("announces the travel leg",
       said:find("Thundercaller", 1, true) ~= nil, said)
 
+-- ============================================================== the drop leg
+-- (!) THE ROUTER IS SHARED, SO THIS ADDON GETS DROPS WITHOUT ASKING FOR THEM --
+-- and that is a claim worth asserting rather than assuming. There is ONE target
+-- slot on the server and two commands that fill it, and InsertDropLeg is called
+-- at both entry points precisely so a quest objective reached by stepping off a
+-- ledge is captioned the same way a boss route is. If it were ever called at the
+-- NorgNav entry point alone, nothing would fail loudly: quest routes would just
+-- quietly walk the long way round.
+--
+-- (!) THE TEXT IS THE HAZARD. A drop caption carries a per cent sign and
+-- brackets, which are Lua pattern metacharacters, so it is the one leg that
+-- would break a parser doing pattern work on a leg. Asserted verbatim.
+SlashCmdList["NORGQUEST"]("")
+quest("Q|4641:g:-618:-4251:340:1")
+quest("E|1")
+chat = {}
+local DROPLEG = "at the edge, drop down to the cavern floor (costs about 24% health)"
+nav("L|" .. DROPLEG)
+local droppedSaid = table.concat(chat, " | ")
+check("announces a drop leg verbatim, percentage and brackets included",
+      droppedSaid:find(DROPLEG, 1, true) ~= nil, droppedSaid)
+
 -- ====================================== the stream arrives on the QUEST prefix
 -- (!) The server stamps the position stream with the OWNING addon s prefix, so a
 -- quest route arrives as NORGQUEST, not NORGNAV. Dispatching by prefix sent it to

@@ -1078,6 +1078,42 @@ check("a leg outranks even the approach note",
       panelText():find(LEG, 1, true) ~= nil
         and panelText():find(apNote, 1, true) == nil, panelText())
 
+-- ===================================================================================
+-- A DROP LEG -- the one caption that asks the player to leave the ground
+--
+-- (!) EVERY OTHER LEG NAMES A PLACE; A DROP NAMES AN ACTION, and it is the only one
+-- a player can decline. The server builds it as
+--   "at the edge, <action> (costs about <n>% health)"
+-- so the text carries a PER CENT SIGN and PARENTHESES -- and all three are Lua
+-- pattern metacharacters, `%` being the escape character itself. Nothing on the
+-- addon side may treat a leg as a pattern: one `find(hint, legText)` without the
+-- plain flag, or a gsub, would silently truncate or error on this one caption while
+-- every lift caption kept working. This asserts the chain byte-for-byte on text that
+-- would expose that, which no existing caption does.
+local DROPLEG = "at the edge, drop down to the cavern floor (costs about 24% health)"
+reply("L|" .. DROPLEG)
+reply("P|0.00|0.00|0.00|30.00|400|280|ok")
+check("a drop leg reaches the player with its percentage and brackets intact",
+      panelText():find(DROPLEG, 1, true) ~= nil, panelText())
+
+-- (!) AND IT MUST OUTRANK THE STATUS LINE FOR THE SAME REASON A LIFT DOES, but the
+-- consequence is sharper. The aim point of a drop leg is the LIP, so the walkable
+-- route genuinely does end there and the status line genuinely does say so -- a
+-- player told "routing as far as I can see" while standing on a cliff edge has been
+-- given the one hint that makes the shortcut look like a failure.
+reply("P|0.00|0.00|0.00|30.00|390|275|far")
+check("a drop leg outranks the routing status at the lip",
+      panelText():find(DROPLEG, 1, true) ~= nil
+        and panelText():find("routing as far as I can see", 1, true) == nil, panelText())
+
+-- (!) AND CLEARS ON LANDING. The server restores the pre-drop aim the moment the
+-- player reaches the landing, which arrives as an EMPTY L|. Leaving it up would tell
+-- somebody standing on the cavern floor to step off a ledge they are no longer on.
+reply("L|")
+reply("P|0.00|0.00|0.00|30.00|380|270|ok")
+check("landing clears the drop instruction",
+      panelText():find("at the edge", 1, true) == nil, panelText())
+
 -- ========================================= the swing as you arrive at the aim
 -- (!) THIS IS THE DUNGEON'S SHARE OF THE ARROW FIX, AND IT NEEDS NO MAP. The
 -- other half -- drawing the bearing from the client's own position -- cannot

@@ -32,6 +32,7 @@ COMMANDS
   /nav reset       forget every down/skipped mark and re-check with the server
   /nav off         stop
   /nav debug       show exactly what the server is sending
+  /nav arrow       whether the arrow is aimed from YOUR position or the server's
   /nav help        this list
 
   A boss you skip with /nav next stays skipped until you leave the instance or
@@ -119,9 +120,20 @@ SCRIPT-SPAWNED FINAL BOSSES
 
 
 HOW IT KNOWS WHERE YOU ARE
-  It does not, and it cannot. The 3.3.5a client will not tell an addon where you
-  are standing inside a classic dungeon. The server sends you your own position
-  over an addon message. You only ever receive your own coordinates.
+  The 3.3.5a client will not tell an addon where you are standing inside a
+  classic dungeon -- there are no dungeon maps to read a position off. So the
+  server sends you your own position over an addon message, three times a
+  second. You only ever receive your own coordinates.
+
+  Outdoors the client CAN answer, and the arrow uses that instead, because a
+  position three times a second is a position that is up to a third of a second
+  old -- which is a couple of yards on foot and several on a fast mount, and is
+  what used to make the arrow wobble as you moved. /nav arrow says which of the
+  two is in use right now; inside a dungeon OFF is the correct answer, not a
+  fault.
+
+  What a dungeon does get is the rest of it: the arrow stops swinging as you
+  arrive on the aim point, and it no longer redraws for turns too small to see.
 
 
 RELATED

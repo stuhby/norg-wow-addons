@@ -7,6 +7,11 @@ local sent, chat = {}, {}
 local texcoord, shown = nil, false
 local frames = {}
 local fontStrings = {}
+-- (!) COUNTED, NOT ONLY CAPTURED. "the arrow was rotated" and "the arrow was
+-- rotated AGAIN" are different questions, and the dead zone and the text split
+-- can only be checked with the second one, because their entire job is to NOT do
+-- work. Overwriting a single `texcoord` cannot tell those two apart.
+local rotations, textWrites = 0, 0
 
 local function newFrame(kind, name)
     local f = { _name = name, _scripts = {}, _events = {} }
@@ -24,13 +29,13 @@ local function newFrame(kind, name)
     function f:CreateTexture()
         return { SetTexture = function() end, SetWidth = function() end,
                  SetHeight = function() end, SetPoint = function() end,
-                 SetVertexColor = function() end,
-                 SetTexCoord = function(_, ...) texcoord = { ... } end }
+                 SetVertexColor = function(_, r, g, b) _G._arrowCol = { r, g, b } end,
+                 SetTexCoord = function(_, ...) texcoord = { ... } rotations = rotations + 1 end }
     end
     function f:CreateFontString()
         local fs = { SetPoint = function() end, SetWidth = function() end,
                  SetJustifyH = function() end,
-                 SetText = function(s, t) s.text = t end }
+                 SetText = function(s, t) s.text = t textWrites = textWrites + 1 end }
         table.insert(fontStrings, fs)
         return fs
     end
@@ -56,6 +61,36 @@ _G.SendChatMessage = function(msg) table.insert(sent, msg) end
 _G.DEFAULT_CHAT_FRAME = { AddMessage = function(_, m) table.insert(chat, m) end }
 _G.SlashCmdList = {}
 _G.IsInInstance = function() return _G.__inInstance or false end
+
+-- ------------------------------------------------- a fake zone map for the client
+-- 3.3.5a hands the client its own position as a pair of 0..1 fractions of the
+-- CURRENT ZONE MAP (GetPlayerMapPosition), and the addon has to work out for
+-- itself how many world yards one of those fractions is worth. That means the
+-- harness has to answer the question the way the client does -- consistently for
+-- a zone, and NOT AT ALL in the places the real client refuses to.
+--
+-- (!) THE HARNESS CAN DO WHAT THE GAME CANNOT: SET THE TWO POSITIONS APART. The
+-- world position in a P| packet is what the SERVER believes, three times a
+-- second; mapWorldX/Y is where the CLIENT is right now. Splitting them is how a
+-- test reproduces a moving player, which is the entire defect.
+local ZONE_TOP, ZONE_LEFT, ZONE_H, ZONE_W = 1000, 500, 2000, 2000
+local mapWorldX, mapWorldY = 0, 0
+local mapBlind = false        -- as in a dungeon, or the map panned to another zone
+local mapZoneId = 12
+
+_G.GetCurrentMapContinent = function() return 1 end
+_G.GetCurrentMapZone = function() return mapZoneId end
+_G.SetMapToCurrentZone = function() end
+_G.GetPlayerMapPosition = function(unit)
+    -- (!) 0,0 IS WHAT THE REAL CLIENT RETURNS WHEN IT WILL NOT ANSWER -- inside
+    -- an instance, or with the world map showing somewhere else. It is not a
+    -- position, and an addon that treats it as one puts the player in the corner
+    -- of the zone.
+    if unit ~= "player" or mapBlind then return 0, 0 end
+    return (ZONE_LEFT - mapWorldY) / ZONE_W, (ZONE_TOP - mapWorldX) / ZONE_H
+end
+local function clientAt(x, y) mapWorldX, mapWorldY = x, y end
+
 _G.GetNumQuestLogEntries = function() return #QLOG, #QLOG - 1 end
 _G.GetQuestLogTitle = function(i)
     local e = QLOG[i]
@@ -671,6 +706,230 @@ local listed = table.concat(chat, " | ")
 check("/quest list distinguishes a pin from an area",
       listed:find("go to", 1, true) ~= nil
       and listed:find("search this area", 1, true) ~= nil, listed)
+
+-- ============================== THE ARROW IS AIMED FROM THE CLIENT'S POSITION
+-- (!) THE DEFECT. The bearing used to be math.atan2(wy - py, wx - px), where
+-- px,py came straight out of the last P| packet -- the SERVER's idea of where
+-- the player is, refreshed every 333 ms (NAV_INTERVAL_MS, norg_nav.cpp). Between
+-- packets the arrow was therefore drawn from where the player HAD been up to a
+-- third of a second ago: a couple of yards on foot, several on a fast mount, and
+-- near the aim point that offset swings the bearing hard. The player turns to
+-- follow, the next packet moves the anchor, and it swings back. That is the
+-- wobble, and it gets worse with speed because the lag is a time, not a distance.
+--
+-- (!) THE CHECKS BELOW ARE ONE ARGUMENT IN TWO HALVES, AND THE SECOND HALF IS
+-- WRITTEN THE WAY IT IS ON PURPOSE. The obvious way to test the no-map case --
+-- "with the map blind the answer equals the server bearing" -- IS A TEST THAT
+-- CANNOT FAIL: when the harness reports no client position there is nothing in
+-- the input for any implementation to disagree about, so it passes against
+-- correct and broken code alike. It was written that way first and thrown out.
+-- What replaces it drives the SERVER position instead and asserts the arrow
+-- follows THAT, which a frozen or ignored anchor fails, plus a direct assertion
+-- that the addon reports the client position as OFF there.
+mapZoneId = 40                 -- a zone this suite has not walked: a clean fit
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+quest("Q|4641:k:0:20:30:1")
+quest("E|1")
+_G.__facing = 0
+
+-- Teach it the scale. Each packet is one (map coordinate, world coordinate)
+-- pair; the addon fits the yards per map unit across them. Nothing is
+-- extrapolated until that fit has a long enough lever arm to be worth anything,
+-- which is what the LEARNING check further down is about.
+for i = 0, 11 do
+    local wx0, wy0 = i * 36, i * 36
+    clientAt(wx0, wy0)
+    nav(string.format("P|%.2f|%.2f|0.00|20.00|412|282|ok", wx0, wy0))
+end
+
+chat = {}
+SlashCmdList["NORGQUEST"]("arrow")
+check("learns the zone scale from the packets themselves, with no shipped table",
+      (chat[#chat] or ""):find("client position: ON", 1, true) ~= nil, chat[#chat])
+
+-- The server's last word puts the player at the origin; the player then runs ten
+-- yards north before the next packet. The aim point is twenty yards west.
+--   from the STALE point (0,0):  atan2(20, 0)   =  90 deg
+--   from where they really are:  atan2(20, -10) = 116.6 deg
+clientAt(0, 0)
+nav("P|0.00|0.00|0.00|20.00|412|282|ok")
+clientAt(10, 0)
+tick(0.05)
+local ca = appliedAngle()
+check("bearing follows the CLIENT, not the position in the last server packet",
+      ca and math.abs(ca - 116.57) < 1.5,
+      tostring(ca) .. " deg, expected ~116.6 (90 means it is still using the stale packet)")
+
+-- No zone map at all: a dungeon, which is NorgNav's entire world, and also the
+-- world map left showing another continent. The arrow must go back to being
+-- driven by the server, exactly as it was before any of this -- so the SERVER
+-- position is what moves here while the client stays put, which is the mirror
+-- image of the check above.
+mapBlind = true
+clientAt(0, 0)
+nav("P|0.00|0.00|0.00|20.00|412|282|ok")
+local sa1 = appliedAngle()
+nav("P|10.00|0.00|0.00|20.00|412|282|ok")
+local sa2 = appliedAngle()
+check("with no zone map the arrow is driven by the SERVER position, as before",
+      sa1 and sa2 and math.abs(sa1 - 90) < 1 and math.abs(sa2 - 116.57) < 1.5,
+      tostring(sa1) .. " then " .. tostring(sa2) .. " deg, expected +90 then ~116.6")
+
+chat = {}
+SlashCmdList["NORGQUEST"]("arrow")
+check("...and says so, so \"it still wobbles in here\" is answerable",
+      (chat[#chat] or ""):find("client position: OFF", 1, true) ~= nil, chat[#chat])
+mapBlind = false
+
+-- (!) A 0,0 READING MUST NOT BECOME A DATA POINT. It is not a position, and one
+-- of them dropped into the fit is a huge outlier at the corner of the zone --
+-- which would tilt the scale for every packet afterwards. Counted through
+-- /quest arrow because the fit has no other visible surface.
+chat = {}
+SlashCmdList["NORGQUEST"]("arrow")
+local nBefore = tonumber((chat[#chat] or ""):match("samples=(%d+)"))
+mapBlind = true
+for _ = 1, 5 do nav("P|0.00|0.00|0.00|20.00|412|282|ok") end
+mapBlind = false
+chat = {}
+SlashCmdList["NORGQUEST"]("arrow")
+local nAfter = tonumber((chat[#chat] or ""):match("samples=(%d+)"))
+check("a 0,0 map reading is refused rather than fitted as a real sample",
+      nBefore and nAfter and nAfter == nBefore,
+      tostring(nBefore) .. " samples -> " .. tostring(nAfter))
+
+-- ================================================= the swing near the aim point
+-- (!) THE OTHER HALF OF THE WOBBLE, AND THE HALF A DUNGEON ALSO GETS. Close to
+-- the aim point the bearing stops being information: a yard sideways swings it
+-- tens of degrees, so the arrow spins during the one part of the trip that needs
+-- no guidance. norg_nav.cpp aims 15-40 yards ahead precisely so this only
+-- happens at the END of a route -- which is why holding the last good heading
+-- there costs nothing.
+clientAt(0, 0)
+nav("P|0.00|0.00|0.00|20.00|412|282|ok")
+tick(0.05)
+local farA = appliedAngle()
+clientAt(0, 22)          -- two yards PAST the aim point: the true bearing flips
+tick(0.05)
+local nearA = appliedAngle()
+check("holds the last good heading once inside the near radius",
+      farA and nearA and math.abs(nearA - farA) < 1,
+      tostring(farA) .. " -> " .. tostring(nearA) .. " deg (a flip to -90 means no hold)")
+
+clientAt(0, 30)          -- ten yards past it: far enough to mean something again
+tick(0.05)
+local pastA = appliedAngle()
+check("...and lets go again as soon as the aim point is far enough to trust",
+      pastA and math.abs(pastA + 90) < 1,
+      tostring(pastA) .. " deg, expected -90 (a stuck +90 means the hold never releases)")
+
+-- (!) A HELD HEADING BELONGS TO ONE ROUTE AND MUST NOT SURVIVE INTO THE NEXT.
+-- The obvious key for that is the destination -- and it is the WRONG one, which
+-- is why this check exists: /quest on the quest already being tracked asks for a
+-- fresh route to the SAME quest id, so a destination-keyed reset sees no change
+-- at all. Standing inside the near radius at that moment, the arrow would go on
+-- showing a heading measured on the previous attempt. That is a confidently
+-- wrong answer rather than a missing one, so it is keyed on the ROUTE instead.
+--
+-- Set up inside the hold, then re-track the same quest with the aim point moved.
+clientAt(0, 0)
+nav("P|0.00|0.00|0.00|20.00|412|282|ok")            -- aiming west: heading +90
+clientAt(0, 19)                                     -- a yard short: inside the hold
+tick(0.05)
+SlashCmdList["NORGQUEST"]("lazy")                   -- re-track the SAME quest 4641
+quest("P|0.00|19.00|3.00|19.00|412|282|ok")         -- new aim, still inside the hold
+local reA = appliedAngle()
+check("a fresh route to the same quest drops the heading held from the last one",
+      reA and math.abs(reA) < 1,
+      tostring(reA) .. " deg, expected 0 (a stuck +90 is the previous route's heading)")
+
+-- ============================================================== the dead zone
+-- (!) A TURN TOO SMALL TO SEE MUST NOT REACH THE TEXTURE. The arrow tip is 26
+-- units from the centre and moves radius * angle, so a hundredth of a radian
+-- moves it a fraction of a pixel. Pushing eight texture coordinates for that is
+-- pure churn at the client's frame rate.
+clientAt(0, 0)
+nav("P|0.00|0.00|0.00|20.00|412|282|ok")
+tick(0.05)
+local r0 = rotations
+_G.__facing = 0.005
+tick(0.05)
+check("a turn too small to see does not re-push the texture",
+      rotations == r0, r0 .. " -> " .. rotations .. " rotations")
+_G.__facing = 0.05
+tick(0.05)
+check("...but one that can be seen does",
+      rotations > r0, r0 .. " -> " .. rotations .. " rotations")
+_G.__facing = 0
+
+-- ========================================= the panel's words are not per-frame
+-- (!) EVERY WORD ON THE PANEL COMES FROM A SERVER PACKET, THREE TIMES A SECOND;
+-- the arrow has to keep up with the player turning, which is per frame. Refresh
+-- used to do both together, so QuestTitles() -- a walk of the whole quest log
+-- calling GetQuestLink and a pattern match per entry -- ran at the frame rate to
+-- rebuild a string that could not have changed. One rebuild writes three font
+-- strings; ten frames of the old code wrote thirty.
+local t0 = textWrites
+for _ = 1, 10 do tick(0.02) end
+check("does not rewrite the panel on every frame",
+      textWrites - t0 <= 3, (textWrites - t0) .. " font-string writes over 10 frames")
+local t1 = textWrites
+nav("P|0.00|0.00|0.00|20.00|300|282|ok")     -- the yard count changed
+check("...but does rewrite it the moment a number on it moves",
+      textWrites > t1, (textWrites - t1) .. " writes after the distance changed")
+
+-- ======================================= no steering on evidence it has not got
+-- (!) A FIT FROM A SHORT LEVER ARM IS NOISE WITH A SLOPE. Until the samples span
+-- enough of the map the scale is not determined, and using it anyway would
+-- replace a known lag with an unknown error. The gate must also RELEASE, or it
+-- would be a fit that never engages -- so both states are asserted here.
+mapZoneId = 41                 -- another fresh zone: a fresh, empty fit
+clientAt(0, 0)
+nav("P|0.00|0.00|0.00|20.00|412|282|ok")
+clientAt(1, 1)
+nav("P|1.00|1.00|0.00|20.00|412|282|ok")
+clientAt(2, 2)
+nav("P|2.00|2.00|0.00|20.00|412|282|ok")
+chat = {}
+SlashCmdList["NORGQUEST"]("arrow")
+check("will not steer by a scale three samples of standing still could not fix",
+      (chat[#chat] or ""):find("LEARNING", 1, true) ~= nil, chat[#chat])
+
+for i = 0, 11 do
+    local wx0, wy0 = i * 36, i * 36
+    clientAt(wx0, wy0)
+    nav(string.format("P|%.2f|%.2f|0.00|20.00|412|282|ok", wx0, wy0))
+end
+chat = {}
+SlashCmdList["NORGQUEST"]("arrow")
+check("...and does engage once the samples cover enough ground",
+      (chat[#chat] or ""):find("client position: ON", 1, true) ~= nil, chat[#chat])
+
+-- ============================= the arrow code is shared with NorgNav VERBATIM
+-- (!) THE TWO ADDONS HAVE ALREADY DRIFTED APART ONCE. NorgNav 1.0 shipped a
+-- mirrored bearing and NorgQuest did not, so the identical arrow was right in a
+-- dungeon and wrong outdoors -- and that is invisible in a screenshot, because a
+-- mirrored arrow is still correct dead ahead and dead behind. The stabiliser is
+-- the same code in both files, so this asserts it byte for byte rather than
+-- trusting a comment that says so.
+local function sharedBlock(path)
+    local f = io.open(path)
+    if not f then return nil end
+    local s = f:read("*a")
+    f:close()
+    return s:match("\n%-%- >>> NORG ARROW STABILISER.-\n%-%- <<< NORG ARROW STABILISER[^\n]*\n")
+end
+local qBlock = sharedBlock("/data/NorgQuest/NorgQuest.lua")
+local nBlock = sharedBlock("/data/NorgNav/NorgNav.lua")
+check("both addons carry the arrow stabiliser",
+      qBlock ~= nil and nBlock ~= nil
+        and qBlock:find("local function ArrowDraw", 1, true) ~= nil
+        and nBlock:find("local function ArrowFix", 1, true) ~= nil,
+      "NorgQuest=" .. tostring(qBlock ~= nil) .. " NorgNav=" .. tostring(nBlock ~= nil))
+check("and the two copies are byte-identical",
+      qBlock ~= nil and qBlock == nBlock,
+      qBlock and nBlock and (#qBlock .. " vs " .. #nBlock .. " bytes") or "one of them is missing")
 
 -- =================================================================== garbage
 local ok = pcall(function()

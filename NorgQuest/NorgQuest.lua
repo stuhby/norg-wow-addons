@@ -156,6 +156,15 @@ local autoMode = true
 local scanAt = 0
 local haveFix, lastStatus = false, "ok"
 local px, py, wx, wy, routeYd, lineYd = 0, 0, 0, 0, 0, 0
+-- (!) COUNTS ROUTES, NOT DESTINATIONS, AND THAT IS THE POINT. ArrowDraw keys its
+-- near-target hold on this, and /quest on the quest ALREADY tracked has to count
+-- as a new route: keyed on the quest id it would read as no change at all, and a
+-- heading held from the previous attempt would carry into this one.
+--
+-- (!) DECLARED HERE, NOT BESIDE Track. A local declared BELOW Refresh is not an
+-- upvalue of it -- Refresh would read a nil GLOBAL of the same name, forever, and
+-- the reset would silently never fire while every test still passed.
+local routeGen = 0
 
 -- Control channel. Same whisper-to-self trick NorgNav uses: the server swallows
 -- the line before it reaches chat, so the worst case if the module is missing is
@@ -219,18 +228,407 @@ local function RotateTexture(tex, angle)
     tex:SetTexCoord(ulx, uly, llx, lly, urx, ury, lrx, lry)
 end
 
+-- >>> NORG ARROW STABILISER -- BYTE-IDENTICAL IN NorgQuest AND NorgNav --------
+--
+-- (!) THE TWO COPIES MUST STAY THE SAME, AND BOTH SUITES CHECK IT. quest_test
+-- and nav_test each read BOTH addon files and fail if this block differs by one
+-- byte, because arrow code drifting apart between the two is a mistake this
+-- project has already made: NorgNav 1.0 shipped a mirrored bearing and NorgQuest
+-- did not, so the identical arrow was right in a dungeon and wrong outdoors.
+-- Edit one copy, paste the whole block over the other, run both suites.
+--
+-- (!) IT MUST SIT BELOW RotateTexture IN BOTH FILES -- it calls it as an upvalue.
+--
+-- WHAT IT IS FOR. The server streams the player's position three times a second
+-- (NAV_INTERVAL_MS, norg_nav.cpp) and the bearing used to be drawn from that
+-- point. Between packets the arrow was therefore aimed from where the player had
+-- been up to a third of a second earlier, so the faster they moved the further
+-- back the anchor sat -- the arrow over-corrected, the player turned to follow
+-- it, and the next packet swung it back. That is the wobble, and it is worse the
+-- faster you go because the anchor's lag is a time, not a distance.
+-- norg_nav.cpp already pushes its aim point out to 15-40 yards
+-- (NAV_LOOKAHEAD_MIN/MAX) to blunt exactly this, with the reason spelled out in
+-- its own comment; that is a mitigation of this defect from the server end.
+--
+-- The client always knows where it is. 3.3.5a has no UnitPosition(), but
+-- GetPlayerMapPosition("player") gives the position on the CURRENT ZONE MAP as
+-- a pair of 0..1 fractions, and the number of world yards per map unit is a
+-- constant for a given map.
+--
+-- (!) THERE IS NO ZONE-BOUNDS TABLE HERE AND NONE IS NEEDED. The world-to-map
+-- conversion behind the route line on the world map is done SERVER-side
+-- (Map2ZoneCoordinates in norg_nav.cpp); only already-normalised numbers ever
+-- reach the client, so there was no client-side conversion to reuse. Rather than
+-- ship a table of every zone's extent, the scale is LEARNED: each position
+-- packet is one (map coordinate, world coordinate) pair, and a running
+-- least-squares fit over those pairs IS the yards per map unit. Learned beats
+-- shipped here -- no data file to go stale, no map it does not know about, and
+-- it is self-checking, because until the fit is good enough nothing changes.
+--
+-- (!) ONLY THE SLOPE IS USED, AND ONLY AS A DELTA FROM THE LAST SERVER FIX. The
+-- estimate is "where the server last said we were, plus how far the map says we
+-- have moved since that packet". Nothing is ever extrapolated further than one
+-- packet, so a scale error is multiplied by a couple of yards rather than by the
+-- width of a zone, and the intercept -- the part a mis-learned fit would get
+-- most wrong -- is never used at all. The worst case is the OLD behaviour, not a
+-- new kind of wrong.
+--
+-- (!) INSIDE AN INSTANCE THIS IS INERT, AND THAT IS NorgNav's HALF OF THE STORY.
+-- 3.3.5a has no dungeon maps, so GetPlayerMapPosition answers 0,0 in every
+-- instance NorgNav covers: no sample is taken, the fit never becomes ready, and
+-- the server position is used exactly as before. Nothing below is instance-aware
+-- -- the same code engages where the client has a usable map and stays out of
+-- the way where it does not, which is why it can be shared verbatim. What
+-- NorgNav does get in full is the other half, the near-target hold and the dead
+-- zone, and those are what stop the texture twitching.
+
+-- Below this many yards from the aim point the bearing stops carrying
+-- information: walking a yard sideways swings it tens of degrees, so it spins
+-- while the player is doing the one part of the trip that needs no guidance.
+-- The server aims 15-40 yards ahead along the route, so the aim point can only
+-- come this close in the last few yards of a trip -- holding the last good
+-- heading there costs nothing during normal travel. No hysteresis band is needed
+-- around it: the two branches agree at the boundary, so chattering across it
+-- cannot be seen.
+local ARROW_NEAR_YD = 5
+
+-- Do not push the texture for a turn too small to see. The tip sits half the
+-- arrow's width from its centre -- 26 of the 52 units -- and it travels
+-- radius * angle, so at this angle it moves well under one screen pixel at any
+-- resolution the game runs at. Nothing suppressed here could have been seen.
+local ARROW_DEAD_RAD = 0.01
+
+-- A step bigger than this is not movement. One packet is a third of a second and
+-- the fastest sustained speed in 3.3.5a, a 310% flying mount, covers about ten
+-- yards in that time. Anything past this means the frame of reference changed
+-- underneath us -- a zone crossing, or the world map panned to somewhere else --
+-- so it is used both to refuse an extrapolation and to spot a fit whose
+-- predictions have stopped landing near the server's own answer.
+local ARROW_MAX_JUMP_YD = 40
+
+-- How much evidence the fit needs before it is allowed to steer. The sample
+-- count alone is not enough: a player standing still contributes samples that
+-- add no information, and a slope drawn from a short lever arm is dominated by
+-- the noise in it. The spread -- the standard deviation of the map coordinate
+-- the samples cover -- is what actually determines the slope, so that is what is
+-- gated on, and being in map units it means the same fraction of any zone.
+local ARROW_FIT_MIN_N      = 8
+local ARROW_FIT_MIN_SPREAD = 0.008
+
+-- How many position packets between attempts to put the world map back onto the
+-- player's own zone. At three packets a second this is a few seconds, which is
+-- unnoticeable and still far more often than anyone re-opens the map.
+local ARROW_MAP_RETRY = 9
+
+local arrowFits = {}      -- map key -> { x = fit, y = fit }, kept so re-entering
+                          -- a zone already walked does not re-learn it
+local arrowFit            -- the pair belonging to arrowKey
+local arrowKey            -- which map the fit and the anchor below belong to
+local arrowKX, arrowKY    -- cached slopes, refreshed once per packet not per frame
+local arrowSX, arrowSY    -- the last position the server sent
+local arrowMX, arrowMY    -- the map position read at that same instant, or nil
+local arrowHeld           -- world bearing held while inside ARROW_NEAR_YD
+local arrowDrawn          -- the angle actually pushed to the texture last time
+local arrowTarget         -- which route we were drawing, so a new one snaps
+local arrowMiss = 0       -- consecutive packets the fit failed to predict
+local arrowRetry = 0
+
+local function ArrowNewFit()
+    return { n = 0, x0 = nil, y0 = nil, sx = 0, sy = 0, sxx = 0, sxy = 0 }
+end
+
+--- One (map coordinate, world coordinate) pair.
+---
+--- (!) ACCUMULATED RELATIVE TO THE FIRST PAIR. Map coordinates sit around 0.5
+--- and world coordinates run to five figures, so summing them raw and taking the
+--- variance as mean-of-squares minus square-of-mean throws away most of the
+--- precision in exactly the small quantity the slope depends on. Offsetting by
+--- the first sample keeps both terms small and leaves the slope identical.
+local function ArrowFitAdd(f, x, y)
+    if not f.x0 then f.x0, f.y0 = x, y end
+    x, y = x - f.x0, y - f.y0
+    f.n = f.n + 1
+    f.sx, f.sy = f.sx + x, f.sy + y
+    f.sxx, f.sxy = f.sxx + x * x, f.sxy + x * y
+end
+
+--- World yards per unit of map coordinate, or nil while that is not yet worth
+--- trusting.
+---
+--- (!) THE SIGN COMES OUT OF THE DATA. Both world axes run backwards against the
+--- map axes in 3.3.5a, but nothing here assumes that: the fit reports whatever
+--- relationship the samples actually show, so a map laid out some other way
+--- would simply produce the other sign and still be right.
+local function ArrowFitSlope(f)
+    if f.n < ARROW_FIT_MIN_N then return nil end
+    local mean = f.sx / f.n
+    local var = f.sxx / f.n - mean * mean
+    if var <= 0 or math.sqrt(var) < ARROW_FIT_MIN_SPREAD then return nil end
+    return (f.sxy / f.n - mean * (f.sy / f.n)) / var
+end
+
+--- (!) 0,0 MEANS "NOT ON THE MAP BEING DISPLAYED", NOT THE TOP-LEFT CORNER.
+--- GetPlayerMapPosition answers relative to whatever the world map is currently
+--- showing, so it returns 0,0 inside an instance and whenever the map has been
+--- panned to another zone. Taking that literally would place the player in the
+--- corner of the zone and send the arrow somewhere absurd, so it is refused --
+--- and the server's position, which is never wrong, is what gets used instead.
+local function ArrowMapPos()
+    if not GetPlayerMapPosition then return nil end
+    local x, y = GetPlayerMapPosition("player")
+    if not x or not y then return nil end
+    if x <= 0 and y <= 0 then return nil end
+    return x, y
+end
+
+--- Which map the numbers above are relative to. A scale learned in one zone
+--- means nothing in the next, so this is what keeps them apart.
+local function ArrowMapKey()
+    local c = GetCurrentMapContinent and GetCurrentMapContinent() or 0
+    local z = GetCurrentMapZone and GetCurrentMapZone() or 0
+    return tostring(c) .. ":" .. tostring(z)
+end
+
+--- The world map does not follow the player around by itself: open it, pan to
+--- another continent, close it, and GetPlayerMapPosition answers 0,0 from then
+--- on for as long as it stays closed. SetMapToCurrentZone puts it back.
+---
+--- (!) ONLY EVER WHILE THE MAP IS HIDDEN. Doing it with the map open would yank
+--- the view out from under whoever is reading it. It is also skipped inside an
+--- instance, where there is no zone map to set and it could only spin.
+local function ArrowRecoverMap()
+    if arrowRetry > 0 then arrowRetry = arrowRetry - 1 return end
+    arrowRetry = ARROW_MAP_RETRY
+    if not SetMapToCurrentZone then return end
+    if IsInInstance and IsInInstance() then return end
+    if WorldMapFrame and WorldMapFrame.IsShown and WorldMapFrame:IsShown() then return end
+    SetMapToCurrentZone()
+end
+
+--- How far the map says the player has moved since the last server fix, in world
+--- yards. nil while there is no anchor, or no scale trusted enough to convert
+--- with.
+---
+--- (!) DELIBERATELY UNCAPPED. The two callers apply ARROW_MAX_JUMP_YD themselves
+--- and they need it for opposite reasons: the draw path refuses an impossible
+--- step, while the health check has to SEE the impossible step to know the fit
+--- has gone bad. Folding the cap in here would hide a broken fit behind a nil and
+--- leave it in place for good, silently steering by the server position with
+--- nothing anywhere to say why.
+local function ArrowDrift(mx, my)
+    if not arrowMX or not arrowKX or not arrowKY then return nil end
+    return (my - arrowMY) * arrowKX, (mx - arrowMX) * arrowKY
+end
+
+--- A fresh position from the server: the anchor the arrow is drawn from, and one
+--- more sample for the scale.
+local function ArrowFix(sx, sy)
+    local key = ArrowMapKey()
+    if key ~= arrowKey then
+        arrowKey = key
+        arrowFit = arrowFits[key]
+        if not arrowFit then
+            arrowFit = { x = ArrowNewFit(), y = ArrowNewFit() }
+            arrowFits[key] = arrowFit
+        end
+        -- The old anchor was measured against a different map, so it is not a
+        -- reference for anything any more.
+        arrowMX, arrowMY = nil, nil
+        arrowMiss = 0
+    end
+
+    local mx, my = ArrowMapPos()
+
+    -- (!) CHECK THE FIT AGAINST THE SERVER BEFORE TRUSTING IT FURTHER. If the
+    -- scale is right, where we said the player would be has to land near where
+    -- the server now says they are. Missing by more than a step could ever be
+    -- means the fit no longer describes the map we are reading, and steering by
+    -- it would be confidently wrong -- so it is dropped and learned again.
+    --
+    -- (!) TWO IN A ROW, NOT ONE. A single miss is also what a dropped packet, a
+    -- lag spike or a hearthstone looks like, and none of those say anything
+    -- about the scale; throwing a good fit away every time the network hiccups
+    -- would keep the arrow permanently degraded on a poor connection.
+    if mx and arrowMX then
+        local dx, dy = ArrowDrift(mx, my)
+        if dx then
+            local ex, ey = arrowSX + dx - sx, arrowSY + dy - sy
+            if ex * ex + ey * ey > ARROW_MAX_JUMP_YD * ARROW_MAX_JUMP_YD then
+                arrowMiss = arrowMiss + 1
+                if arrowMiss >= 2 then
+                    arrowFit = { x = ArrowNewFit(), y = ArrowNewFit() }
+                    arrowFits[key] = arrowFit
+                    arrowMiss = 0
+                end
+            else
+                arrowMiss = 0
+            end
+        end
+    end
+
+    if mx then
+        -- World X against map Y and world Y against map X: the map's vertical
+        -- axis is the world's north-south one and its horizontal axis the
+        -- world's east-west one.
+        ArrowFitAdd(arrowFit.x, my, sx)
+        ArrowFitAdd(arrowFit.y, mx, sy)
+    else
+        ArrowRecoverMap()
+    end
+
+    arrowKX = ArrowFitSlope(arrowFit.x)
+    arrowKY = ArrowFitSlope(arrowFit.y)
+    arrowSX, arrowSY = sx, sy
+    arrowMX, arrowMY = mx, my
+end
+
+--- Signed shortest way round from b to a, in (-pi, pi].
+local function ArrowAngleDelta(a, b)
+    local d = (a - b) % (2 * math.pi)
+    if d > math.pi then d = d - 2 * math.pi end
+    return d
+end
+
+--- Best available player position: the client's own where it can be had, the
+--- server's otherwise.
+local function ArrowWhere()
+    local mx, my = ArrowMapPos()
+    if mx then
+        local dx, dy = ArrowDrift(mx, my)
+        if dx and dx * dx + dy * dy <= ARROW_MAX_JUMP_YD * ARROW_MAX_JUMP_YD then
+            return arrowSX + dx, arrowSY + dy
+        end
+    end
+    return arrowSX, arrowSY
+end
+
+--- Aim the texture at (wx, wy). Safe to call every frame: the whole cost is a
+--- map read, an atan2 and two comparisons unless the drawn angle really moved.
+---
+--- (!) `id` MUST CHANGE ON EVERY NEW ROUTE, NOT MERELY ON A NEW DESTINATION.
+--- The near-target hold below belongs to the route it was measured on, and both
+--- addons can be asked to route to the SAME place again -- /quest on the quest
+--- already tracked, /nav on the boss already showing. Keyed on the destination
+--- those read as "no change", so a heading held from the previous attempt would
+--- carry over; keyed on the route it cannot. Both callers therefore pass a
+--- counter bumped where the route is requested, not the target itself.
+-- (!) ARROW COLOUR IS ARROW STATE, NOT TEXT STATE, AND IT IS AN UPVALUE FOR A
+-- REASON. Refresh was split into a per-frame ArrowDraw and a change-gated
+-- RefreshText, and the colour was left inside RefreshText -- so StartNav's dimmed
+-- placeholder survived on any route where no text happened to change, showing a
+-- dead grey arrow on a live route. RefreshText decides the colour; ArrowDraw
+-- applies it every frame. Do NOT read `col` here: it is a local of RefreshText,
+-- and referencing it from ArrowDraw silently reads a nil global and does nothing.
+local arrowCol = COL_OK
+
+local function ArrowDraw(tex, wx, wy, id)
+    if not tex then return end
+
+    -- (!) COLOUR FIRST, BEFORE EVERY EARLY RETURN BELOW. It does not depend on
+    -- position or on the arrow having turned, and both guards below fire in the
+    -- exact case this exists for: waiting for a route means no position fix yet,
+    -- and the dead zone skips the redraw once the bearing settles. Applied after
+    -- either, StartNav's grey placeholder stays up on a live route.
+    tex:SetVertexColor(arrowCol[1], arrowCol[2], arrowCol[3])
+    if id ~= arrowTarget then
+        arrowTarget = id
+        arrowHeld = nil
+        arrowDrawn = nil
+    end
+
+    local ex, ey = ArrowWhere()
+    -- Nothing has ever arrived, so there is nothing to point from. Callers gate
+    -- on their own fix flag as well; this is the belt to that pair of braces,
+    -- because a nil here would throw once per frame for the rest of the session.
+    if not ex then return end
+
+    local dx, dy = wx - ex, wy - ey
+    local world
+    if dx * dx + dy * dy > ARROW_NEAR_YD * ARROW_NEAR_YD or not arrowHeld then
+        world = math.atan2(dy, dx)
+        arrowHeld = world
+    else
+        world = arrowHeld
+    end
+
+    -- (!) THE FACING IS SUBTRACTED AFTER THE HOLD, NEVER FOLDED INTO IT. What is
+    -- held near the target is the WORLD heading; the player's own facing is read
+    -- fresh every frame, so turning on the spot still swings the arrow instantly
+    -- even while the heading it is drawn from is being held steady.
+    local rel = world - (GetPlayerFacing and GetPlayerFacing() or 0)
+    if arrowDrawn and math.abs(ArrowAngleDelta(rel, arrowDrawn)) < ARROW_DEAD_RAD then
+        return
+    end
+    arrowDrawn = rel
+    RotateTexture(tex, rel)
+
+
+end
+
+--- One line for the diagnostic commands. Whether the client position is in use
+--- is invisible on screen -- a stale arrow and a live one look identical until
+--- you move -- so it has to be printable.
+local function ArrowStatus()
+    local mx = ArrowMapPos()
+    local n = arrowFit and arrowFit.x.n or 0
+    if not mx then
+        return string.format("client position: OFF (no map position here)  map=%s samples=%d",
+            tostring(arrowKey), n)
+    end
+    if not arrowKX or not arrowKY then
+        return string.format("client position: LEARNING  map=%s samples=%d",
+            tostring(arrowKey), n)
+    end
+    return string.format("client position: ON  map=%s samples=%d  scale %.0f / %.0f yd per map unit",
+        tostring(arrowKey), n, arrowKX, arrowKY)
+end
+-- <<< NORG ARROW STABILISER ---------------------------------------------------
+
+--- (!) HAS THE PANEL'S TEXT ACTUALLY CHANGED?
+---
+--- (!) THE ARROW IS REDRAWN EVERY FRAME AND THE WORDS ARE NOT, AND THAT SPLIT IS
+--- THE POINT. The arrow has to keep up with the player turning, which is a frame
+--- by frame thing; every word on the panel comes from a server packet, which
+--- arrives three times a second. Rebuilding the caption in between re-ran
+--- QuestTitles() -- a walk of the whole quest log calling GetQuestLink and a
+--- pattern match on every entry -- at the client's frame rate, for a string that
+--- could not have changed. Comparing the inputs instead is nine comparisons and
+--- no allocation, so a player standing still with a settled route now does no
+--- text work at all.
+---
+--- (!) THE QUEST TITLE IS NOT IN THE LIST, AND IT CANNOT BE. It is looked up
+--- from the log, which is EMPTY for the first moment after login -- so the first
+--- render says "Quest #4641" and no input below would ever change to correct it.
+--- QUEST_LOG_UPDATE clears txTracked instead, which forces one rebuild.
+local txTracked, txKind, txName, txType, txObj, txRoute, txLine, txStatus, txLeg
+
+local function TextChanged()
+    local o = objectives[tracked]
+    local kind = o and o.kind or nil
+    if tracked == txTracked and kind == txKind and targetName == txName
+       and targetType == txType and targetObjective == txObj
+       and routeYd == txRoute and lineYd == txLine
+       and lastStatus == txStatus and legText == txLeg then
+        return false
+    end
+    txTracked, txKind, txName, txType, txObj =
+        tracked, kind, targetName, targetType, targetObjective
+    txRoute, txLine, txStatus, txLeg = routeYd, lineYd, lastStatus, legText
+    return true
+end
+
 --- (!) World angle is atan2(dy, dx). +X is NORTH and +Y is WEST, and the server
 --- moves things with x += cos(angle), y += sin(angle), so 0 faces north and it
 --- increases toward west -- the same convention GetPlayerFacing() reports in.
 --- Negating dy mirrors the arrow left-to-right, which still looks like a working
 --- arrow because it stays correct dead ahead and dead behind. That exact bug
 --- shipped in NorgNav 1.0 and presented as a pathing fault.
-local function Refresh()
-    if not tracked or not haveFix then return end
-
-    local rel = math.atan2(wy - py, wx - px) - (GetPlayerFacing and GetPlayerFacing() or 0)
-    RotateTexture(arrow, rel)
-
+---
+--- (!) THE BEARING IS NO LONGER TAKEN FROM px, py. Those are the SERVER's idea of
+--- where the player is, three times a second; ArrowDraw asks the stabiliser
+--- above for the client's own position and falls back to px, py when it has
+--- nothing better. See the block header for why that is the whole fix.
+local function RefreshText()
     local col, hint = COL_OK, nil
     if lastStatus == "ok" then
         distFS:SetText(routeYd .. " yd")
@@ -250,8 +648,6 @@ local function Refresh()
         col = COL_HARD
         hint = "no route"
     end
-
-    arrow:SetVertexColor(col[1], col[2], col[3])
 
     local o = objectives[tracked]
     local titles = QuestTitles()
@@ -327,7 +723,17 @@ local function Refresh()
     -- pointing at a dock rather than at your objective.
     if legText then hint = legText end
 
+    arrowCol = col
+
     hintFS:SetText(hint or "")
+end
+
+--- Everything the panel does in one call. The arrow half runs on every frame;
+--- the text half only when one of the things it prints has moved.
+local function Refresh()
+    if not tracked or not haveFix then return end
+    ArrowDraw(arrow, wx, wy, routeGen)
+    if TextChanged() then RefreshText() end
 end
 
 -- ------------------------------------------------------------------- routing
@@ -348,6 +754,7 @@ local function Sorted()
 end
 
 local function Track(questId)
+    routeGen = routeGen + 1
     tracked = questId
     subscribed = true
     legText = nil
@@ -681,6 +1088,9 @@ local function OnNavMessage(msg)
     routeYd, lineYd = tonumber(e) or 0, tonumber(f) or 0
     lastStatus = st
     haveFix = true
+    -- The stabiliser needs the raw server position AND the moment it arrived --
+    -- pairing it with the map coordinate read right now is the whole calibration.
+    ArrowFix(px, py)
     Refresh()
 end
 
@@ -782,6 +1192,11 @@ ev:SetScript("OnEvent", function(_, event, ...)
     -- repeatedly while the log streams in at login. Rescanning on each one would
     -- send a chat line per event. Coalesce into a single delayed scan instead.
     scanAt = 1.0
+    -- (!) AND FORCE ONE CAPTION REBUILD. The quest TITLE is read from the log, so
+    -- the render that happens before the log has streamed in says "Quest #4641";
+    -- nothing TextChanged() watches would ever differ afterwards, so without this
+    -- the panel would carry that number until the tracked quest changed.
+    txTracked = nil
 end)
 
 local wasOnTaxi = false
@@ -835,6 +1250,18 @@ SlashCmdList["NORGQUEST"] = function(arg)
         Say("/quest <text> -- track the quest whose title matches")
         Say("/quest off -- stop; /quest scan -- ask the server again")
         Say("/quest why -- print what the addon is tracking and why")
+        Say("/quest arrow -- is the arrow using your own position or the server's")
+        return
+    end
+
+    if arg == "arrow" then
+        -- (!) THIS STATE IS INVISIBLE ON SCREEN. An arrow drawn from the client's
+        -- own position and one drawn from a third-of-a-second-old server position
+        -- look identical in a screenshot -- the difference only shows while you
+        -- are moving, which is exactly when nobody can read a chat line. So it has
+        -- to be printable, or "the arrow still wobbles" cannot be told apart from
+        -- "the client position never engaged here".
+        Say(ArrowStatus())
         return
     end
 

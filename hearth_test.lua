@@ -459,11 +459,17 @@ check("a known refusal is explained in words",
       chatMatching("delete one first") ~= nil, lastChat())
 chat = {}
 msg("X|DUPNAME")
--- (!) Assert it does NOT blame the NAME. Binds are auto-named now, so "that name
--- is taken" describes something the player never did. This is the whole reason
--- the wording changed; a test on the old phrase would have passed forever.
+-- (!) THIS ASSERTION USED TO BE INVERTED, AND IT PINNED A FALSEHOOD. It required
+-- the message to blame the PLACE and forbade the word "name", on the reasoning
+-- that binds are auto-named so a collision must be the same inn. That premise is
+-- measurably wrong: DUPNAME is keyed on the NAME, and two different innkeepers
+-- whose areas share a name collide -- Caris Sunlance and Jarin Dawnglow both sit
+-- in "Argent Tournament Grounds" and both derive the same 24-byte label. It is
+-- wrong the other way too: two binds at ONE inn under two typed names are BOTH
+-- accepted, because nothing checks position. So the message must name the name.
 check("DUPNAME is explained", chatMatching("already have a bind saved") ~= nil, lastChat())
-check("DUPNAME blames the place, not a name", chatMatching("that name") == nil, lastChat())
+check("DUPNAME blames the name, which is what it is keyed on",
+      chatMatching("that name") ~= nil, lastChat())
 
 -- (!) AND THE README MUST QUOTE IT WORD FOR WORD. Its troubleshooting section
 -- tells the player what they will see on screen; a PARAPHRASE there ("Already

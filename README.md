@@ -12,8 +12,8 @@ copy than this table describes.
 
 | Addon | Version | Command | What it does |
 |---|---|---|---|
-| **NorgQuest** | 1.13 | `/quest` | Quest arrow that follows a real path, draws the route on the world map, and routes across continents by boat and zeppelin |
-| **NorgNav** | 2.8 | `/nav` | Arrow to the next boss in a dungeon, with real pathing rather than a straight bearing |
+| **NorgQuest** | 1.14 | `/quest` | Quest arrow that follows a real path, draws the route on the world map, and routes across continents by boat and zeppelin |
+| **NorgNav** | 2.9 | `/nav` | Arrow to the next boss in a dungeon, with real pathing rather than a straight bearing |
 | **NorgHearth** | 1.1 | `/hs` | Save up to eight innkeeper binds and pick which one the hearthstone sends you to |
 | **NorgAHValue** | 1.6 | `/ahprice` | Fills the auction sell slot at the highest price the server's auction-house bot will actually pay |
 | **NorgMail** | 1.6 | `/mail` | Empties the mailbox from one button, skipping C.O.D. and GM mail |

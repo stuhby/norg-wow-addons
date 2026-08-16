@@ -71,10 +71,13 @@ local wantPrint        -- /hs list is waiting for the answer; see PrintList
 local REFUSAL = {
     NONAME   = "give it a name first  --  /hs save <name>",
     LONGNAME = "that name is too long (" .. MAX_NAME .. " characters at most).",
-    -- (!) Worded for AUTO-NAMING. Binds are named after the place now, so a
-    -- collision means you already saved this location -- the player never typed
-    -- a name, and telling them one is taken would be baffling.
-    DUPNAME  = "you already have a bind saved for that place.",
+    -- (!) Worded for AUTO-NAMING -- the player usually never typed a name, so
+    -- "that name is taken" would be baffling. But do not say "that PLACE", which
+    -- an earlier wording did and which is wrong in both directions: DUPNAME is
+    -- keyed on the NAME, so two different inns whose areas share a name collide
+    -- (Caris Sunlance and Jarin Dawnglow both derive "Argent Tournament Ground"),
+    -- and two binds at ONE inn under two typed names are both accepted.
+    DUPNAME  = "you already have a bind saved under that name.",
     FULL     = "you already have " .. MAX_ROWS .. " saved binds -- delete one first.",
     NOSLOT   = "you have no saved bind with that number.",
     BADMAP   = "that bind is not usable any more -- bind at an innkeeper again.",

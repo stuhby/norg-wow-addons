@@ -46,9 +46,27 @@ COMMANDS
   /quest scan      ask the server again
   /quest off       stop
   /quest why       print what is being tracked and why
+  /quest arrow     whether the arrow is aimed from YOUR position or the server's
   /quest help      this list
 
   /nq works as a short form. Drag the panel anywhere; it remembers.
+
+
+WHERE THE ARROW IS AIMED FROM
+  The server sends you your own position three times a second, which means it
+  is up to a third of a second old -- a couple of yards on foot, several on a
+  fast mount. Drawing the bearing from that point is what used to make the
+  arrow wobble, and why it wobbled harder the faster you moved.
+
+  It now takes your position from the client instead, and uses the server only
+  for where to GO. It works that out for itself from the packets as you walk,
+  so there is no table of zones to go stale and nothing to configure; until it
+  has enough to be sure it simply behaves as it did before. /quest arrow says
+  which of the two is in use.
+
+  Two things it does everywhere, including where the client has no position to
+  give: the arrow stops swinging as you arrive on the point it is aiming at,
+  and it no longer redraws for turns too small to see.
 
 
 WHO OWNS THE ARROW

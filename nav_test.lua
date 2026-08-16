@@ -11,6 +11,11 @@ local chat = {}          -- everything it printed
 local texcoord = nil     -- last SetTexCoord call
 local arrowShown = nil   -- last Show/Hide on the arrow texture
 local shown = false
+-- (!) COUNTED, NOT ONLY CAPTURED. "the arrow was rotated" and "the arrow was
+-- rotated AGAIN" are different questions, and the dead zone and the text split
+-- can only be checked with the second one, because their whole job is to NOT do
+-- work. Overwriting a single `texcoord` cannot tell those two apart.
+local rotations, textWrites = 0, 0
 
 local frames = {}
 local fontstrings = {}
@@ -42,8 +47,8 @@ local function newFrame(kind, name, parent)
             SetTexture = function() end,
             SetWidth = function() end, SetHeight = function() end,
             SetPoint = function() end,
-            SetVertexColor = function() end,
-            SetTexCoord = function(_, ...) texcoord = { ... } end,
+            SetVertexColor = function(_, r, g, b) _G._arrowCol = { r, g, b } end,
+            SetTexCoord = function(_, ...) texcoord = { ... } rotations = rotations + 1 end,
             -- Captured because "no arrow at all" is a real rendering state now:
             -- an nr=1 entry has no coordinate to point at, and the whole point is
             -- that it must not draw one anyway.
@@ -57,7 +62,7 @@ local function newFrame(kind, name, parent)
         local fs = {
             SetPoint = function() end, SetWidth = function() end,
             SetJustifyH = function() end,
-            SetText = function(self2, t) self2.text = t end,
+            SetText = function(self2, t) self2.text = t textWrites = textWrites + 1 end,
         }
         table.insert(fontstrings, fs)
         return fs
@@ -89,6 +94,26 @@ _G.SendChatMessage = function(msg)
 end
 _G.DEFAULT_CHAT_FRAME = { AddMessage = function(_, m) table.insert(chat, m) end }
 _G.SlashCmdList = {}
+
+-- --------------------------------------------- the client's own map position
+-- (!) BLIND BY DEFAULT, BECAUSE THAT IS WHAT A DUNGEON IS. 3.3.5a ships no
+-- dungeon maps, so GetPlayerMapPosition answers 0,0 everywhere NorgNav normally
+-- works -- and that is the state the whole suite above runs in, deliberately.
+-- The last section switches it on to prove NorgNav's copy of the shared arrow
+-- code is LIVE and not a dead paste; that distinction is invisible otherwise,
+-- because inert code and correct code look identical when nothing can drive it.
+local ZONE_TOP, ZONE_LEFT, ZONE_H, ZONE_W = 1000, 500, 2000, 2000
+local mapWorldX, mapWorldY = 0, 0
+local mapBlind = true
+
+_G.GetCurrentMapContinent = function() return 1 end
+_G.GetCurrentMapZone = function() return 12 end
+_G.SetMapToCurrentZone = function() end
+_G.GetPlayerMapPosition = function(unit)
+    if unit ~= "player" or mapBlind then return 0, 0 end
+    return (ZONE_LEFT - mapWorldY) / ZONE_W, (ZONE_TOP - mapWorldX) / ZONE_H
+end
+local function clientAt(x, y) mapWorldX, mapWorldY = x, y end
 
 -- (!) GetAddOnMetadata IS REAL IN 3.3.5a -- Atlas 3.x calls it at file scope, see
 -- atlas-src/Atlas-3/Atlas/Atlas.lua:39 -- but plain Lua has no such global, so
@@ -212,6 +237,27 @@ check("skips the boss the server says is dead",
 -- (!) '?' means "not loaded in the grid", which is the NORMAL answer for anything
 -- on the far side of an instance. Treating it as dead would silently skip
 -- encounters the player still has to fight.
+-- (!) THE DIMMED PLACEHOLDER MUST BE UNDONE BY THE FIRST REPAINT. StartNav greys
+-- the arrow to 0.5 while it waits for a route. When Refresh was split into a
+-- per-frame ArrowDraw and a change-gated RefreshText, the colour stayed in
+-- RefreshText -- so on a route where no text changed, the grey never lifted and
+-- a live arrow looked dead. The colour is an upvalue applied by ArrowDraw now.
+-- (!) This fails if `col` is read from ArrowDraw instead: it is a local of
+-- RefreshText, so the reference silently resolves to a nil global and no colour
+-- is ever applied -- which is how the first attempt at this fix passed while
+-- doing nothing.
+-- (!) ACK THE START FIRST. The P| handler discards packets while a START is
+-- unacknowledged (NorgNav.lua, `if #startQ > 0 then return end`) -- that is the
+-- subscription rule from the mis-credit fix, and without the ack this test
+-- reports "colour never applied" for the wrong reason entirely.
+ackStarts()
+_G._arrowCol = nil
+reply("P|0.00|0.00|60.00|80.00|412|282|ok")
+check("dimmed placeholder is undone on the first repaint",
+      _G._arrowCol ~= nil and not (_G._arrowCol[1] == 0.5 and _G._arrowCol[2] == 0.5
+                                   and _G._arrowCol[3] == 0.5),
+      _G._arrowCol and table.concat(_G._arrowCol, ",") or "colour never applied")
+
 check("does NOT treat unknown as dead",
       startMsg and not startMsg:find("36.80", 1, true), startMsg)
 
@@ -1031,5 +1077,141 @@ reply("L|" .. LEG)
 check("a leg outranks even the approach note",
       panelText():find(LEG, 1, true) ~= nil
         and panelText():find(apNote, 1, true) == nil, panelText())
+
+-- ========================================= the swing as you arrive at the aim
+-- (!) THIS IS THE DUNGEON'S SHARE OF THE ARROW FIX, AND IT NEEDS NO MAP. The
+-- other half -- drawing the bearing from the client's own position -- cannot
+-- work in here, because 3.3.5a has no dungeon maps to read a position off. What
+-- an instance does get is this: close to the aim point the bearing stops being
+-- information, because a yard sideways swings it tens of degrees, so the arrow
+-- spins through the one part of the trip that needs no guidance. The server aims
+-- 15-40 yards ahead along the route (NAV_LOOKAHEAD_MIN/MAX, norg_nav.cpp), so
+-- the aim point only ever comes this close at the END of a route.
+--
+-- Driven entirely from the SERVER position, which is exactly how a dungeon runs.
+ackStarts()
+_G.__facing = 0
+reply("P|0.00|0.00|0.00|20.00|412|282|ok")         -- 20 yards west of the player
+local farA = appliedAngle()
+reply("P|0.00|22.00|0.00|20.00|4|2|ok")            -- two yards PAST the aim point
+local nearA = appliedAngle()
+check("holds the last good heading inside the near radius -- in a dungeon too",
+      farA and nearA and math.abs(nearA - farA) < 1,
+      tostring(farA) .. " -> " .. tostring(nearA) .. " deg (a flip to -90 means no hold)")
+
+reply("P|0.00|30.00|0.00|20.00|10|10|ok")          -- ten yards past: trustworthy again
+local pastA = appliedAngle()
+check("...and releases as soon as the aim point is far enough to trust",
+      pastA and math.abs(pastA + 90) < 1,
+      tostring(pastA) .. " deg, expected -90 (a stuck +90 means the hold never releases)")
+
+-- (!) A HELD HEADING BELONGS TO ONE ROUTE AND MUST NOT SURVIVE INTO THE NEXT.
+-- The obvious key for that is the boss being routed to -- and it is the WRONG
+-- one, which is why this check exists: /nav on the boss already showing asks for
+-- a fresh route to the SAME entry, so a target-keyed reset sees no change at
+-- all. Standing inside the near radius at that moment, the arrow would go on
+-- showing a heading measured on the previous attempt: a confidently wrong answer
+-- rather than a missing one. It is keyed on the ROUTE instead, and NorgNav does
+-- that bump in its own StartNav, so this is not covered by NorgQuest's copy.
+reply("P|0.00|0.00|0.00|20.00|412|282|ok")        -- far: heading +90
+reply("P|0.00|19.00|0.00|20.00|4|2|ok")           -- a yard short: inside the hold
+SlashCmdList["NORGNAV"]("mutanus")                -- re-route to the SAME boss
+ackStarts()
+reply("P|0.00|19.00|3.00|19.00|412|282|ok")       -- new aim, still inside the hold
+local reA = appliedAngle()
+check("a fresh route to the same boss drops the heading held from the last one",
+      reA and math.abs(reA) < 1,
+      tostring(reA) .. " deg, expected 0 (a stuck +90 is the previous route's heading)")
+
+-- ============================================================== the dead zone
+-- (!) A TURN TOO SMALL TO SEE MUST NOT REACH THE TEXTURE. The arrow tip is 26
+-- units from the centre and moves radius * angle, so a hundredth of a radian
+-- moves it a fraction of a pixel. Pushing eight texture coordinates for that is
+-- pure churn at the client's frame rate.
+reply("P|0.00|0.00|0.00|20.00|412|282|ok")
+local r0 = rotations
+_G.__facing = 0.005
+tick(0.05)
+check("a turn too small to see does not re-push the texture",
+      rotations == r0, r0 .. " -> " .. rotations .. " rotations")
+_G.__facing = 0.05
+tick(0.05)
+check("...but one that can be seen does",
+      rotations > r0, r0 .. " -> " .. rotations .. " rotations")
+_G.__facing = 0
+
+-- ========================================= the panel's words are not per-frame
+-- (!) THE ARROW IS PER-FRAME AND THE WORDS ARE NOT. The arrow has to keep up
+-- with the player turning; every word on the panel comes from a server packet,
+-- three times a second. Refresh used to do both together at a fixed 20 Hz, which
+-- both wasted the text work and capped how smoothly the arrow could follow a
+-- turn. One rebuild writes three font strings.
+local t0 = textWrites
+for _ = 1, 10 do tick(0.02) end
+check("does not rewrite the panel on every frame",
+      textWrites - t0 <= 3, (textWrites - t0) .. " font-string writes over 10 frames")
+local t1 = textWrites
+reply("P|0.00|0.00|0.00|20.00|300|282|ok")         -- the yard count changed
+check("...but does rewrite it the moment a number on it moves",
+      textWrites > t1, (textWrites - t1) .. " writes after the distance changed")
+
+-- ================================== NorgNav's copy of the arrow code is LIVE
+-- (!) INERT CODE AND CORRECT CODE LOOK THE SAME WHEN NOTHING CAN DRIVE THEM.
+-- Everything above runs blind, which is honest -- it is what a dungeon is -- but
+-- it means none of it would notice if NorgNav's copy of the stabiliser had been
+-- pasted in wrong, or wired to nothing. Switching the harness's map on is the
+-- only way to tell the two apart, and it is not a fiction: NorgNav is pointed at
+-- an outdoor map often enough while the server is deciding which map you are on.
+mapBlind = false
+for i = 0, 11 do
+    local wx0, wy0 = i * 36, i * 36
+    clientAt(wx0, wy0)
+    reply(string.format("P|%.2f|%.2f|0.00|20.00|412|282|ok", wx0, wy0))
+end
+chat = {}
+SlashCmdList["NORGNAV"]("arrow")
+check("NorgNav learns the same scale from the same packets",
+      (chat[#chat] or ""):find("client position: ON", 1, true) ~= nil, chat[#chat])
+
+-- The server's last word puts the player at the origin; the player then runs ten
+-- yards north before the next packet arrives. The aim point is twenty west.
+--   from the STALE point (0,0):  atan2(20, 0)   =  90 deg
+--   from where they really are:  atan2(20, -10) = 116.6 deg
+clientAt(0, 0)
+reply("P|0.00|0.00|0.00|20.00|412|282|ok")
+clientAt(10, 0)
+tick(0.05)
+local ca = appliedAngle()
+check("...and aims from the CLIENT once it has one, exactly as NorgQuest does",
+      ca and math.abs(ca - 116.57) < 1.5,
+      tostring(ca) .. " deg, expected ~116.6 (90 means NorgNav's copy is not wired up)")
+mapBlind = true
+
+-- ========================== the arrow code is shared with NorgQuest VERBATIM
+-- (!) THE TWO ADDONS HAVE ALREADY DRIFTED APART ONCE. NorgNav 1.0 shipped a
+-- mirrored bearing and NorgQuest did not, so the identical arrow was right in a
+-- dungeon and wrong outdoors -- and that is invisible in a screenshot, because a
+-- mirrored arrow is still correct dead ahead and dead behind. The stabiliser is
+-- the same code in both files, so this asserts it byte for byte rather than
+-- trusting a comment that says so. Deliberately duplicated in quest_test: either
+-- suite must catch the drift on its own, since either may be the one that is run.
+local function sharedBlock(path)
+    local f = io.open(path)
+    if not f then return nil end
+    local s = f:read("*a")
+    f:close()
+    return s:match("\n%-%- >>> NORG ARROW STABILISER.-\n%-%- <<< NORG ARROW STABILISER[^\n]*\n")
+end
+local nBlock = sharedBlock("/data/NorgNav/NorgNav.lua")
+local qBlock = sharedBlock("/data/NorgQuest/NorgQuest.lua")
+check("both addons carry the arrow stabiliser",
+      nBlock ~= nil and qBlock ~= nil
+        and nBlock:find("local function ArrowDraw", 1, true) ~= nil
+        and qBlock:find("local function ArrowFix", 1, true) ~= nil,
+      "NorgNav=" .. tostring(nBlock ~= nil) .. " NorgQuest=" .. tostring(qBlock ~= nil))
+check("and the two copies are byte-identical",
+      nBlock ~= nil and nBlock == qBlock,
+      nBlock and qBlock and (#nBlock .. " vs " .. #qBlock .. " bytes") or "one of them is missing")
+
 print(string.format("\n  ==== %d passed, %d failed ====", pass, fail))
 os.exit(fail == 0 and 0 or 1)

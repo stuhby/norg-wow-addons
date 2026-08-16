@@ -62,11 +62,15 @@ WHAT IT IS NOT
 
 THINGS THAT LOOK LIKE BUGS AND ARE NOT
   A save is refused          the words on screen are "NorgHearth: you already
-                             have a bind saved for that place." Entries are
+                             have a bind saved under that name." Entries are
                              named after where you are bound, so a save is
                              refused when a bind of that name is already on the
-                             list -- normally because that city is. The entry
-                             you have still points at it: nothing is lost by the
+                             list -- usually because that city already is, but
+                             not always: a handful of inns sit in places that
+                             share a name, so two genuinely different innkeepers
+                             can want the same entry. Give the second one a name
+                             of your own with /hs save <name>. The entry you have
+                             still points where it did: nothing is lost by the
                              refusal and nothing is overwritten. Names given
                              with /hs save <name> collide the same way, and are
                              compared case-insensitively, so Dalaran and dalaran

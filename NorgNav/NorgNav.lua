@@ -128,6 +128,11 @@ local ackLost = false       -- latched so a mute warns once, not every route
 local autoMode = true
 local lastStatus = "ok"
 local haveFix = false
+-- (!) OWNED BY THE SERVER'S REPLY, NEVER SET OPTIMISTICALLY ON SEND. If /nav record
+-- flipped this locally and the module were absent or the message lost, the flag and
+-- the server would disagree permanently and the next /nav record would send the wrong
+-- word forever. R|on and R|off are the only writers.
+local recording = false
 local px, py, wx, wy = 0, 0, 0, 0
 local routeYd, lineYd = 0, 0
 -- (!) COUNTS ROUTES, NOT BOSSES, AND THAT IS THE POINT. ArrowDraw keys its
@@ -1061,6 +1066,25 @@ local function OnAddonMessage(msg)
         return
     end
 
+    -- R|on  /  R|off|<count> -- the path recorder. The trail itself never comes back
+    -- here; it goes to the worldserver log, because it can be thousands of points.
+    if kind == "R" then
+        local mode, count = msg:match("^R|(%a+)|?(%d*)$")
+        if mode == "on" then
+            recording = true
+            Say("|cffffd100recording your path.|r Walk the route you want, then /nav record again.")
+        else
+            recording = false
+            local n = tonumber(count) or 0
+            if n > 0 then
+                Say(string.format("stopped -- %d points captured. They are in the server log.", n))
+            else
+                Say("stopped -- nothing was captured.")
+            end
+        end
+        return
+    end
+
     if kind == "S" then
         -- (!) HANDLE EVERY S|<word>, NOT ONLY THE TWO WE EXPECT.
         --
@@ -1567,6 +1591,18 @@ SlashCmdList["NORGNAV"] = function(arg)
                 dead[b] and "  |cff808080(down)|r" or "",
                 (skipped[b] and not dead[b]) and "  |cff808080(skipped)|r" or ""))
         end
+        return
+    end
+
+    -- (!) THE RECORDING HAPPENS ON THE SERVER, AND IT HAS TO. A 3.3.5a client cannot
+    -- read its own world position: there is no UnitPosition(), and
+    -- GetPlayerMapPosition returns NORMALISED coordinates that are 0,0 inside an
+    -- instance -- which is exactly where the routes worth correcting live. So this
+    -- sends two words and the server does the work. The trail comes out in the
+    -- worldserver log rather than back to the client, because it can run to thousands
+    -- of points and no addon message could carry it.
+    if arg == "record" or arg == "rec" then
+        Send(recording and "REC OFF" or "REC ON")
         return
     end
 

@@ -1,6 +1,6 @@
 ## Interface: 30300
 ## Title: Norg Nav
-## Notes: Live pathfinding arrow using the server's navmesh. Alternative to NorgDungeons.
+## Notes: Live pathfinding arrow using the server's navmesh.
 ## Author: Norg
 ## Version: 2.11
 ## SavedVariables: NorgNavDB

@@ -134,8 +134,3 @@ HOW IT KNOWS WHERE YOU ARE
 
   What a dungeon does get is the rest of it: the arrow stops swinging as you
   arrive on the aim point, and it no longer redraws for turns too small to see.
-
-
-RELATED
-  NorgDungeons -- map artwork and a boss checklist. Different approach to the
-  same problem; run either or both, they do not conflict.

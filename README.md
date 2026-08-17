@@ -10,29 +10,15 @@ Versions are the ones in each `.toc`, which is also what the addon prints in cha
 as it loads. If the line in chat says something else, you are running an older
 copy than this table describes.
 
-### Current
-
 | Addon | Version | Command | What it does |
 |---|---|---|---|
 | **NorgQuest** | 1.14 | `/quest` | Quest arrow that follows a real path, draws the route on the world map, and routes across continents by boat and zeppelin |
-| **NorgNav** | 2.10 | `/nav` | **The dungeon addon.** Arrow to the next boss, following a real path over the server's navmesh rather than a straight bearing — around corners, up ramps, across lifts and down drops |
+| **NorgNav** | 2.11 | `/nav` | **The dungeon addon.** Arrow to the next boss, following a real path over the server's navmesh rather than a straight bearing — around corners, up ramps, across lifts and down drops |
 | **NorgHearth** | 1.2 | `/hs` | Save up to eight innkeeper binds and pick which one the hearthstone sends you to. Binding at an innkeeper saves itself |
 | **NorgAHValue** | 1.6 | `/ahprice` | Fills the auction sell slot at the highest price the server's auction-house bot will actually pay |
 | **NorgMail** | 1.6 | `/mail` | Empties the mailbox from one button, skipping C.O.D. and GM mail |
 | **NorgOneBag** | 1.1 | `/onebag` | Single-bag inventory view |
 | **!NorgBugs** | 1.0 | `/bugs` | Catches Lua errors and shows them in a window you can copy out of. Install this before reporting that something "did nothing" |
-
-### Archived — superseded by NorgNav
-
-These still work and are kept for reference, but **NorgNav is the dungeon addon**.
-It does what both of these do and then actually walks you there: they can tell you
-the boss order and roughly which way to face, while NorgNav paths you to the boss.
-Neither is being developed further.
-
-| Addon | Version | Command | Why it is archived |
-|---|---|---|---|
-| **NorgDungeons** | 1.1 | `/dungeon` | Static maps with boss order and a marker legend. NorgNav knows the same order and routes to each boss, so the map is a reference rather than a tool |
-| **NorgRoutes** | 1.1 | `/route` | Boss order plus a compass bearing and distance to the next boss. A bearing points through walls; NorgNav follows the ground |
 
 ## Download
 
@@ -69,17 +55,6 @@ at an innkeeper first.
 **NorgAHValue** prices against a specific auction-house bot's buying rules. The
 numbers in `DataSell.lua` / `DataVendor.lua` are generated from a server's item
 table; on a different server they will be wrong.
-
-The archived **NorgDungeons** and **NorgRoutes** need no module — they are ordinary
-client addons, each with its own window and slash command, and NorgDungeons ships
-its map artwork so Atlas is not required. But their `Data.lua` is generated from the
-Norg server's encounter table and creature spawns, so on a different server the boss
-order and the bearings describe the wrong world.
-
-Both are superseded by **NorgNav**, which is generated from the same server data and
-additionally routes to each boss. If you install only one dungeon addon, install
-NorgNav. The other two are kept because a static map is occasionally handy to glance
-at, not because they are the recommended way to run an instance.
 
 **!NorgBugs** is deliberately named with a leading `!`. 3.3.5a loads addon folders in
 listing order and `!` sorts ahead of letters, so it installs its error handler before

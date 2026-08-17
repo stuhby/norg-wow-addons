@@ -1,8 +1,7 @@
 --[[----------------------------------------------------------------------------
   NorgNav -- a live pathfinding arrow for dungeons and raids.
 
-  ALTERNATIVE TO NorgDungeons, not a replacement. Run either or both; they do not
-  conflict. NorgDungeons shows a map and a boss checklist. This points an arrow.
+  Points an arrow at where you are going, using the server's own navmesh.
 
   HOW IT KNOWS WHERE YOU ARE
   It does not, and it cannot. The 3.3.5a client will not tell an addon where the

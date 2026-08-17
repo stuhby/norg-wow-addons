@@ -1,9 +1,0 @@
-## Interface: 30300
-## Title: Norg Routes
-## Notes: Boss order and directions for every dungeon and raid, generated from the Norg server.
-## Author: Norg
-## Version: 1.1
-## SavedVariables: NorgRoutesDB
-
-Data.lua
-NorgRoutes.lua

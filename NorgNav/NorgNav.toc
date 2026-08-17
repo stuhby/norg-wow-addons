@@ -2,7 +2,7 @@
 ## Title: Norg Nav
 ## Notes: Live pathfinding arrow using the server's navmesh. Alternative to NorgDungeons.
 ## Author: Norg
-## Version: 2.9
+## Version: 2.10
 ## SavedVariables: NorgNavDB
 
 Data.lua

@@ -2,7 +2,7 @@
 ## Title: Norg Hearth
 ## Notes: Keep several hearthstone destinations and pick between them. Innkeeper binds only.
 ## Author: Norg
-## Version: 1.1
+## Version: 1.2
 ## SavedVariables: NorgHearthDB
 
 NorgHearth.lua

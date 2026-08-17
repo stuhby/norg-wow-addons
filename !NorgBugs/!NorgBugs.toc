@@ -1,0 +1,8 @@
+## Interface: 30300
+## Title: NorgBugs
+## Notes: Catches Lua errors and shows them in a window you can copy out of. No dependencies.
+## Version: 1.0
+## SavedVariables: NorgBugsDB
+## DefaultState: enabled
+
+!NorgBugs.lua

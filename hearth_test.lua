@@ -136,6 +136,13 @@ _G.GetAddOnMetadata = function(_, field)
 end
 local TOC_VERSION = _G.GetAddOnMetadata("NorgHearth", "Version")
 
+-- (!) A SETTABLE STUB, because PollBind's entire job is reacting to this string
+-- CHANGING. It starts nil on purpose: that is genuinely what the client returns
+-- early in a login, and the addon has to survive it without burning its baseline
+-- on a blank (see the empty-answer note in PollBind).
+local bindPlace = nil
+_G.GetBindLocation = function() return bindPlace end
+
 dofile(ADDON)
 
 -- ------------------------------------------------------------------- assertions
@@ -242,30 +249,93 @@ sent = {}
 click(row(1))
 check("cleared rows are inert too", #sent == 0, tostring(lastSent()))
 
--- ========================================== saving is one click, and no typing
--- (!) ASSERT THE REPLACED WIDGETS ARE ABSENT, not merely that the live one works.
+-- ============================================ saving happens by itself, no click
+-- (!) ASSERT EVERY REPLACED WIDGET IS ABSENT, not merely that the live path works.
 -- An earlier cut shipped still building the pair the auto-naming replaced -- a
 -- dead hidden EditBox (NorgHearthName), a visible name box (NorgHearthNameBox)
--- and a second Save button (NorgHearthSaveButton) -- sitting over the real
--- button without stopping it working. Nothing MISBEHAVED, which is precisely
--- why only an absence check keeps them gone.
-local save = byName["NorgHearthSave"]
-check("the window has a Save button", save ~= nil)
+-- and a second Save button (NorgHearthSaveButton) -- sitting over the real button
+-- without stopping it working. Nothing MISBEHAVED, which is precisely why only an
+-- absence check keeps them gone. The Save button itself is now on that list: the
+-- watcher below replaced it, and a button left behind would be a control that
+-- duplicates something already automatic.
+check("no Save button is built any more",
+      byName["NorgHearthSave"] == nil, tostring(byName["NorgHearthSave"]))
 check("no name box is built at all",
       byName["NorgHearthName"] == nil and byName["NorgHearthNameBox"] == nil,
       tostring(byName["NorgHearthName"]) .. " / " .. tostring(byName["NorgHearthNameBox"]))
 check("...and no second Save button drawn across the first",
       byName["NorgHearthSaveButton"] == nil, tostring(byName["NorgHearthSaveButton"]))
 
--- (!) THE BUTTON SENDS A BARE SAVE. The server derives the name from the area
--- the homebind sits in, so the client must not invent or require one. If this
--- ever starts sending a name again, the auto-naming is silently dead.
-sent = {}; chat = {}
-click(save)
-check("Save sends a bare SAVE for the server to name",
+-- ---------------------------------------------------------------- the bind watcher
+-- (!) DRIVE THE ADDON'S REAL OnUpdate ON ITS REAL EVENT FRAME. This is the same
+-- frame that carries CHAT_MSG_ADDON, and that is deliberate in the addon: the
+-- WINDOW's OnUpdate only ticks while it is shown, and auto-save has to work for
+-- somebody who never opens the window at all. If this ever ends up on the window,
+-- these tests keep passing while the feature silently stops working when closed.
+local watch = ev._scripts["OnUpdate"]
+check("the event frame carries an OnUpdate for the bind watcher", watch ~= nil)
+local function poll(seconds) if watch then watch(ev, seconds or 3) end end
+
+-- A nil answer must not count as a place, or the baseline is burned on a blank and
+-- the very next real value looks like a change -- saving on every login.
+sent = {}; bindPlace = nil
+poll()
+check("a nil bind location sends nothing", #sent == 0, tostring(lastSent()))
+bindPlace = ""
+poll()
+check("an empty bind location sends nothing too", #sent == 0, tostring(lastSent()))
+
+-- First real value is the BASELINE. Recording it must be silent.
+sent = {}; bindPlace = "Undercity"
+poll()
+check("the first real bind location is only a baseline, and sends nothing",
+      #sent == 0, tostring(lastSent()))
+
+-- Unchanged means nothing to do, however many ticks pass.
+sent = {}
+poll(); poll(); poll()
+check("an unchanged bind location keeps sending nothing",
+      #sent == 0, tostring(lastSent()))
+
+-- (!) AND NOW THE ACTUAL FEATURE: a CHANGE sends a bare SAVE. Bare, because the
+-- server derives the name from the area the homebind sits in. If this ever starts
+-- sending a name, the auto-naming is silently dead.
+sent = {}; chat = {}; bindPlace = "Orgrimmar"
+poll()
+check("binding somewhere new sends a bare SAVE",
       lastSent() == "NORGHOME SAVE", tostring(lastSent()))
 check("...and does not scold the player about a missing name",
       chatMatching("give it a name") == nil, tostring(lastChat()))
+
+-- (!) ONCE, NOT EVERY TICK. Without the addon writing the new place back before
+-- sending, this would re-send twice a second forever -- and because the server
+-- answers HAVEIT silently, the flood would be completely invisible in game.
+sent = {}
+poll(); poll(); poll()
+check("the same new location is not sent again on later ticks",
+      #sent == 0, tostring(lastSent()))
+
+-- The reply names the slot and says it was not asked for, so the line makes sense
+-- to somebody who pressed nothing.
+chat = {}
+msg("A|3|1637|Orgrimmar")
+check("an automatic save says so and names the slot",
+      chatMatching("slot 3") ~= nil, tostring(lastChat()))
+
+-- (!) HAVEIT IS SILENT. It is the ordinary answer to re-binding at an inn already
+-- saved, so it must produce NO chat at all -- not even the unknown-code fallback.
+chat = {}; bindPlace = "Thunder Bluff"; poll()
+msg("X|HAVEIT")
+check("HAVEIT produces no chat line at all", #chat == 0, tostring(lastChat()))
+
+-- (!) FULL MUST STILL REACH THE PLAYER, and must say the bind was NOT kept. This is
+-- the operator's stated choice: refuse and let a human pick what to give up.
+chat = {}; bindPlace = "Ironforge"; poll()
+msg("X|FULL")
+check("FULL explains the bind was not saved", chatMatching("could not save") ~= nil,
+      tostring(lastChat()))
+check("...and points at the X to free a slot", chatMatching("remove one with its X") ~= nil,
+      tostring(lastChat()))
 
 -- A chosen name still travels -- through the slash command, the only route left.
 sent = {}
@@ -455,8 +525,13 @@ slash("")                                       -- leave it open, as the blocks 
 -- ===================================================================== refusals
 chat = {}
 msg("X|FULL")
+-- (!) THE WORDING MOVED WITH THE FEATURE, and this assertion moved with it rather
+-- than being deleted. It used to require "delete one first", which was fine while a
+-- human pressed Save and could read the refusal as advice. Now the save is
+-- automatic, so the message has to say the bind was NOT KEPT -- advice for next time
+-- is exactly the wrong reading when an inn you just bound at went unsaved.
 check("a known refusal is explained in words",
-      chatMatching("delete one first") ~= nil, lastChat())
+      chatMatching("could not save") ~= nil, lastChat())
 chat = {}
 msg("X|DUPNAME")
 -- (!) THIS ASSERTION USED TO BE INVERTED, AND IT PINNED A FALSEHOOD. It required
@@ -590,10 +665,10 @@ check("minimap button has a click handler",
 -- because a stray widget is only ever found by looking for it: the addon works
 -- perfectly with three dead ones stacked underneath, which is how an earlier
 -- cut was built.
-check("a Save button exists", _G.NorgHearthSave ~= nil)
-check("and it is the only bottom control -- no boxes, no second button",
-      _G.NorgHearthName == nil and _G.NorgHearthNameBox == nil
-      and _G.NorgHearthSaveButton == nil)
+check("the bottom strip has no buttons at all -- saving is automatic",
+      _G.NorgHearthSave == nil and _G.NorgHearthName == nil
+      and _G.NorgHearthNameBox == nil and _G.NorgHearthSaveButton == nil,
+      tostring(_G.NorgHearthSave) .. " / " .. tostring(_G.NorgHearthSaveButton))
 
 -- (!) AND THE INSTRUCTION IS PRINTED ONCE. The empty-list line sits near the
 -- top and the hint sits at the foot, and on a first run BOTH are on screen: an
@@ -610,19 +685,22 @@ for _, r in ipairs(frames) do
 end
 check("the window teaches the innkeeper step exactly once", #instructions == 1,
       #instructions .. ": " .. table.concat(instructions, " ~ "))
-check("...and the label that keeps it is the one that also says what Save does",
-      instructions[1] ~= nil and instructions[1]:find("Save", 1, true) ~= nil,
+-- (!) AND IT MUST NOT TELL ANYONE TO PRESS ANYTHING. There is no button to press,
+-- so a label still naming one is a live wrong instruction -- the exact failure the
+-- "exactly once" count above was written to catch in its earlier form.
+check("...and it does not instruct a click that no longer exists",
+      instructions[1] ~= nil and instructions[1]:find("click", 1, true) == nil,
       tostring(instructions[1]))
 
--- (!) THE BUTTON SENDS A BARE SAVE. The server names the bind after the city
--- it sits in, so the client must NOT invent or require a name. If this ever
--- starts sending one again, the auto-naming is silently dead.
-sent = {}
-if _G.NorgHearthSave then _G.NorgHearthSave._scripts["OnClick"]() end
+-- (!) THE WATCHER SENDS A BARE SAVE. The server names the bind after the area it
+-- sits in, so the client must NOT invent or require a name. If this ever starts
+-- sending one, the auto-naming is silently dead. Driven through the real OnUpdate
+-- rather than a button, because the button is gone.
+sent = {}; bindPlace = "Darnassus"; poll()
 local savedMsg
 for _, m in ipairs(sent) do if m:find("SAVE") then savedMsg = m end end
-check("Save button sends a SAVE", savedMsg ~= nil, tostring(savedMsg))
-check("Save button sends NO name -- the server derives it",
+check("the watcher sends a SAVE on a new bind", savedMsg ~= nil, tostring(savedMsg))
+check("the watcher sends NO name -- the server derives it",
       savedMsg ~= nil and savedMsg:match("SAVE%s*$") ~= nil,
       tostring(savedMsg))
 

@@ -1,8 +1,11 @@
 --[[----------------------------------------------------------------------------
   NorgHearth -- keep several hearthstone destinations and pick between them.
 
+  Binding at an innkeeper SAVES ITSELF -- there is nothing to press. The commands
+  below are for the cases the automatic path deliberately does not cover.
+
   /hs              open the window
-  /hs save         remember where you are bound right now, named after the place
+  /hs save         save the current bind by hand, named after the place
   /hs save <name>  the same, under a name you choose instead
   /hs use <n>      make saved bind <n> the live one
   /hs del <n>      forget saved bind <n>
@@ -17,6 +20,11 @@
   the server to move your bind back to a saved one. The stone stays the ordinary
   stone -- same cast bar, same cooldown -- because it IS the ordinary stone, and
   this only ever changes where it points.
+
+  The saving is automatic because the CLIENT can see the bind move even though
+  the server cannot -- see PollBind. When all 8 slots are full a new bind is
+  REFUSED rather than evicting one, and you are told so; which destination to give
+  up is a decision for a person, not for this addon.
 
   That is also why there is no "bind to here" command: Save() in norg_home.cpp
   copies the homebind the core already holds (m_homebind*) and takes no
@@ -33,9 +41,10 @@
   that is treated as "nothing to update" instead of as an answer.
 
   (!) AND THAT ANSWER GOES STALE WHILE YOU LOOK AT IT. Binding at an innkeeper
-  raises no event this addon registers, so an open window re-asks on a timer --
+  raises no event this addon can register, so an open window re-asks on a timer --
   see the OnUpdate note in Build for why polling, of all things, is the honest
-  answer here.
+  answer here. PollBind polls for the same reason and it is the same absent event:
+  one watches the SERVER'S list, the other watches YOUR OWN bind.
 
   (!) A NEWLY COPIED ADDON IS INVISIBLE UNTIL A FULL CLIENT RESTART. 3.3.5a scans
   the AddOns folder at LAUNCH only; /reload will not find it. Rule that out
@@ -62,6 +71,11 @@ local pending          -- rows arriving between H| batches; nil when not listing
 local pendingCurrent   -- slot flagged live WITHIN that arriving list; nil = none
 local current          -- slot the server says is the LIVE bind
 local wantPrint        -- /hs list is waiting for the answer; see PrintList
+local autoPending      -- the SAVE in flight was sent by the watcher, not by a person
+local lastBindPlace    -- last GetBindLocation() seen; nil until the baseline is taken
+local sinceBindPoll = 0
+
+local BIND_POLL_EVERY = 2        -- seconds between GetBindLocation() checks
 
 -- (!) THE LOOKUP IS WRITTEN "REFUSAL[c] or <fallback>" (see the X| handler), AND
 -- THE FALLBACK IS LOAD-BEARING. The server can grow a new refusal code long
@@ -78,9 +92,21 @@ local REFUSAL = {
     -- (Caris Sunlance and Jarin Dawnglow both derive "Argent Tournament Ground"),
     -- and two binds at ONE inn under two typed names are both accepted.
     DUPNAME  = "you already have a bind saved under that name.",
-    FULL     = "you already have " .. MAX_ROWS .. " saved binds -- delete one first.",
+    -- (!) WORDED FOR THE AUTOMATIC PATH, which is now the only path most players
+    -- ever hit. It has to say the new bind was NOT kept -- "delete one first" alone
+    -- reads like advice for next time, when in fact the inn you just bound at went
+    -- unsaved -- and it has to name the X button, because the operator's stated
+    -- choice was to refuse and let a human decide which destination to give up
+    -- rather than have the addon silently evict one.
+    FULL     = "could not save this bind -- all " .. MAX_ROWS .. " slots are full."
+               .. " Open /hs, remove one with its X, then /hs save.",
     NOSLOT   = "you have no saved bind with that number.",
     BADMAP   = "that bind is not usable any more -- bind at an innkeeper again.",
+    -- (!) HAVEIT IS DELIBERATELY ABSENT FROM THIS TABLE and is swallowed by the X|
+    -- handler instead. The server sends it when the live homebind is already saved,
+    -- which is the ORDINARY outcome of re-binding at an inn you use often. There is
+    -- nothing wrong and nothing for the player to do, so saying anything at all
+    -- would train them to ignore this addon's chat lines.
 }
 
 local function Say(msg)
@@ -219,6 +245,56 @@ local function SaveNamed(raw)
     Send("SAVE " .. name)
 end
 
+-- ------------------------------------------------------------------- auto-save
+--
+-- (!) THE CLIENT WATCHES FOR THE BIND BECAUSE THE SERVER CANNOT.
+-- There is no core hook for homebind -- PlayerScript.h offers only
+-- OnPlayerBindToInstance, which is instance saves, a different thing. The obvious
+-- server-side alternative, checking m_homebind* from PLAYERHOOK_ON_UPDATE, would
+-- run for every one of the ~2000 playerbots on this server every tick in order to
+-- serve at most a handful of humans. The client already knows its own bind:
+-- GetBindLocation() returns the place name and changes as soon as the bind moves.
+-- So poll that one string and send the same bare SAVE the old button sent.
+--
+-- (!) THE BASELINE IS RECORDED WITHOUT SENDING ANYTHING. If login sent a SAVE, then
+-- every session would try to re-save a bind you have had for weeks. Usually the
+-- server would answer HAVEIT and the pointlessness would be invisible -- but on a
+-- FULL list it answers FULL, so a player who was doing nothing at all would be told
+-- their slots are full every time they logged in. Auto-save is for a bind that
+-- changes WHILE you play, which is exactly when an innkeeper bind happens.
+--
+-- (!) KNOWN AND ACCEPTED LIMIT: this detects a change of PLACE NAME, so binding at
+-- a second inn inside the SAME area is not noticed. That is consistent rather than
+-- broken -- the server names a bind after its area, so both inns would derive the
+-- same name and the second would be refused DUPNAME anyway. /hs save <name> is
+-- still there for anyone who genuinely wants both.
+local function PollBind(elapsed)
+    -- Defensive: if the API is missing, stay quiet rather than error every 2s.
+    if not GetBindLocation then return end
+
+    sinceBindPoll = sinceBindPoll + (elapsed or 0)
+    if sinceBindPoll < BIND_POLL_EVERY then return end
+    sinceBindPoll = 0
+
+    local place = GetBindLocation()
+    -- (!) AN EMPTY OR NIL ANSWER IS NOT A CHANGE. It is what the API returns before
+    -- the client has the bind yet, early in a login, and treating it as a new place
+    -- would burn the baseline on a blank and then "detect" a change to the real
+    -- value a moment later -- saving on every single login.
+    if not place or place == "" then return end
+
+    if lastBindPlace == nil then
+        lastBindPlace = place
+        return
+    end
+
+    if place == lastBindPlace then return end
+
+    lastBindPlace = place
+    autoPending = true
+    Send("SAVE")        -- the server derives the name, dedupes, and caps at 8
+end
+
 -- ---------------------------------------------------------------- server replies
 
 local function OnMessage(msg)
@@ -271,7 +347,16 @@ local function OnMessage(msg)
 
     local slot, _, name = msg:match("^A|(%d+)|(%d+)|(.*)$")
     if slot then
-        Say("saved |cffffffff" .. name .. "|r.")
+        -- (!) SAY WHICH SAVE THIS WAS. An unprompted "saved Thunder Bluff." with no
+        -- cause is the kind of line people learn to scroll past; naming the slot and
+        -- the fact that nobody asked for it is what makes the automatic behaviour
+        -- legible the first time somebody sees it.
+        if autoPending then
+            Say("bound somewhere new -- saved |cffffffff" .. name .. "|r to slot " .. slot .. ".")
+        else
+            Say("saved |cffffffff" .. name .. "|r.")
+        end
+        autoPending = false
         RequestList()      -- the server assigns the slot, so re-read rather than guess
         return
     end
@@ -303,7 +388,17 @@ local function OnMessage(msg)
 
     local code = msg:match("^X|(%u+)$")
     if code then
+        -- (!) SWALLOWED, NOT EXPLAINED. See the REFUSAL table: HAVEIT means the bind
+        -- is already saved, which is the normal answer whenever the automatic save
+        -- fires for an inn you have used before. Note this bypasses the "or ..."
+        -- fallback on purpose -- that fallback exists so an UNKNOWN code still says
+        -- something, and HAVEIT is not unknown, it is uninteresting.
+        if code == "HAVEIT" then
+            autoPending = false
+            return
+        end
         Say(REFUSAL[code] or ("refused (" .. code .. ")."))
+        autoPending = false
         return
     end
 end
@@ -471,21 +566,23 @@ local function Build()
     -- they just walked into is busywork whenever the city name is what they
     -- wanted anyway. It is still a trade, so restore the pair if the typed name
     -- ever turns out to be the common case -- do not restore it by accident.
-    local save = CreateFrame("Button", "NorgHearthSave", f, "UIPanelButtonTemplate")
-    save:SetWidth(200)
-    save:SetHeight(24)
-    save:SetPoint("BOTTOM", f, "BOTTOM", 0, 16)
-    save:SetText("Save current location")
-    save:SetScript("OnClick", function()
-        -- Bare SAVE: the server derives the name from where you are bound.
-        SaveNamed("")
-    end)
-
+    -- (!) THERE IS NO SAVE BUTTON ANY MORE, and its absence is the feature.
+    -- PollBind above notices the bind move and saves it, so a button would only ever
+    -- be pressed to do what already happened. What is NOT lost: /hs save and
+    -- /hs save <name> both still work from the slash handler, which parses its own
+    -- argument and never read this button -- so a deliberate second bind in one area,
+    -- or a name of your own, is still reachable. Removing the button therefore costs
+    -- nothing a mouse could do that the watcher does not already do.
+    --
+    -- (!) DO NOT "restore" it because a save seems to have been missed. The likelier
+    -- causes, in order: the second inn was in the SAME area (see PollBind's accepted
+    -- limit), or all 8 slots are full and the FULL refusal was scrolled past.
     local hintFS = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    hintFS:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 20, 50)
+    hintFS:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 20, 22)
     hintFS:SetWidth(210)
     hintFS:SetJustifyH("LEFT")
-    hintFS:SetText("Bind at an innkeeper, then click Save -- it is named after the city.")
+    hintFS:SetText("Binding at an innkeeper saves itself, named after the place."
+                   .. "  X forgets one.")
 
     tinsert(UISpecialFrames, "NorgHearthFrame")   -- Escape closes it, like stock frames
     f:Hide()
@@ -524,6 +621,12 @@ ev:SetScript("OnEvent", function(_, event, ...)
         OnMessage(message)
     end
 end)
+
+-- (!) THE WATCHER RUNS ON THIS FRAME, NOT ON THE WINDOW. The window's own OnUpdate
+-- only ticks while it is shown, and the whole point of auto-save is that you never
+-- open the window at all. This frame is never shown and never hidden, so its
+-- OnUpdate is the one thing here that is always running.
+ev:SetScript("OnUpdate", function(_, elapsed) PollBind(elapsed) end)
 
 -- ---------------------------------------------------------------------- command
 

@@ -45,7 +45,7 @@ NorgNavBosses = {
     {i=5,n='Skum',x=-285.6,y=-313.0,z=-69.2,g=87131},
     {i=6,n='Lord Serpentis',x=-120.2,y=-24.6,z=-28.6,g=38148},
     {i=7,n='Verdan the Everliving',x=-81.9,y=32.3,z=-31.0,g=33974},
-    {i=8,n='Mutanus the Devourer',x=114.8,y=237.2,z=-96.0,g=0,ap=1,tg=0,t='wake naralex here, mutanus rises from the water and comes to you'},
+    {i=8,n='Mutanus the Devourer',x=-135.0,y=125.4,z=-78.1,g=0,ap=1,tg=0,t='talk to the disciple of naralex here, he escorts you to naralex; mutanus rises from the water when naralex wakes'},
   },
   [47] = {   -- Razorfen Kraul
     {i=1,n='Roogug',x=2143.0,y=1581.6,z=80.4,g=87346},

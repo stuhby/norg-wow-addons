@@ -34,9 +34,20 @@ Neither is being developed further.
 | **NorgDungeons** | 1.1 | `/dungeon` | Static maps with boss order and a marker legend. NorgNav knows the same order and routes to each boss, so the map is a reference rather than a tool |
 | **NorgRoutes** | 1.1 | `/route` | Boss order plus a compass bearing and distance to the next boss. A bearing points through walls; NorgNav follows the ground |
 
+## Download
+
+**[Get the addons here](https://github.com/stuhby/norg-wow-addons/releases/latest)** —
+one zip per addon, plus `Norg-All-Addons.zip` if you want the lot. Rebuilt
+automatically from `main` on every change, so the release is never behind the code.
+
+You do not need to clone the repo or download files one at a time.
+
 ## Install
 
-Copy the folder you want into `Interface/AddOns/` and **restart the client**.
+Unzip the folder into `Interface/AddOns/` and **restart the client**.
+
+The zip contains the addon FOLDER, so extracting it straight into `AddOns/` gives you
+`AddOns/NorgQuest/…` which is what the client expects.
 
 (!) **`/reload` will not pick up a newly added addon** — 3.3.5a scans the AddOns
 folder at launch only, so a folder copied in while the game is running does not

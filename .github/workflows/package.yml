@@ -1,0 +1,77 @@
+# Package each addon as its own zip and publish them on a rolling "latest" release,
+# so people can download one addon without cloning the repo or picking files out of
+# the GitHub tree one at a time.
+#
+# WHY A RELEASE RATHER THAN COMMITTED ZIPS: a zip is a binary that changes every time
+# any file inside it changes, so committing them makes every push rewrite several
+# hundred KB of unreadable blobs and the repo grows forever. Release assets live
+# outside git history and can be replaced in place.
+#
+# (!) NO SECRET IS NEEDED AND NONE SHOULD BE ADDED. `permissions: contents: write`
+# plus the automatic GITHUB_TOKEN is the entire grant required to cut a release.
+# A personal access token here would be strictly worse: broader scope, manual
+# rotation, and it would sit in repository secrets for anyone with admin to read.
+name: Package addons
+
+on:
+  push:
+    branches: [main]
+    # Docs-only pushes should not re-cut a release.
+    paths-ignore:
+      - '**/*.md'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build one zip per addon
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          # (!) QUOTE THE GLOB TARGET. One addon folder is deliberately named
+          # "!NorgBugs" -- the leading "!" makes the 3.3.5a client load it before the
+          # other addons, which is what lets it catch their load-time Lua errors.
+          # Unquoted it is fine in a script (history expansion is interactive-only),
+          # but the zip is named without the "!" so the download URL stays clean.
+          for dir in */; do
+            name="${dir%/}"
+            case "$name" in
+              *Norg*) ;;
+              *) continue ;;
+            esac
+            # The zip must contain the FOLDER, not its contents, because the install
+            # step is "drop this into Interface/AddOns/". A zip of loose .lua files
+            # extracts into the wrong place and the addon never loads.
+            out="dist/${name#!}.zip"
+            zip -q -r "$out" "$name" -x '*.git*'
+            echo "  packaged $name -> $out"
+          done
+
+          # A single archive for anyone who just wants the lot.
+          zip -q -r dist/Norg-All-Addons.zip . \
+            -x '.git/*' '.github/*' 'dist/*' '*_test.lua' 'test_harness.lua'
+
+          ls -la dist/
+
+      - name: Publish rolling latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Delete and recreate so assets never accumulate stale versions. The tag is
+          # moved to the current commit so the release always reflects main.
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest dist/*.zip \
+            --title "Latest addons" \
+            --notes "Built automatically from \`main\` (${GITHUB_SHA:0:7}).
+
+          Download the addon you want, unzip it into \`Interface/AddOns/\`, and **restart the client fully** — 3.3.5a only scans the AddOns folder at launch, so \`/reload\` will not find a newly added folder.
+
+          \`Norg-All-Addons.zip\` contains every addon at once."

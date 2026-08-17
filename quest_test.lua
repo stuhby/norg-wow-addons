@@ -46,11 +46,20 @@ end
 
 -- A small fake quest log. The client has no questId lookup in 3.3.5a, so the
 -- addon has to dig the id out of the LINK -- which is exactly what this models.
+--
+-- (!) "Errand For Nobody" IS IN THE LOG AND IS NEVER IN A Q| BATCH, ON PURPOSE.
+-- Every other entry here is one the fake server also offers, so until it was
+-- added this harness could not tell "the addon routes what the SERVER listed"
+-- apart from "the addon routes what the LOG says" -- the two agreed on every id.
+-- See the unlisted-quest section near the bottom for what it proves. Its title
+-- shares no substring with the search words the other tests use ("lazy",
+-- "vile"), so no existing match can pick it up by accident.
 local QLOG = {
     { header = true, title = "Durotar" },
     { id = 4641, title = "Lazy Peons" },
     { id = 806,  title = "Vile Familiars" },
     { id = 5041, title = "Sarkoth" },
+    { id = 8899, title = "Errand For Nobody" },
 }
 
 _G.CreateFrame = newFrame
@@ -952,6 +961,71 @@ check("both addons carry the arrow stabiliser",
 check("and the two copies are byte-identical",
       qBlock ~= nil and qBlock == nBlock,
       qBlock and nBlock and (#qBlock .. " vs " .. #nBlock .. " bytes") or "one of them is missing")
+
+-- ============================ never route a quest the server did not itself list
+-- (!) THIS IS THE CLIENT-SIDE HALF OF "ONLY ANSWER FOR A QUEST THAT IS ACTUALLY
+-- HELD", AND IT IS WHY THE SERVER-SIDE HOLE WAS DIAGNOSTIC-ONLY.
+--
+-- Measured on the live server (2026-08-17), against a bot holding NEITHER quest
+-- -- both counts are 0 in
+--   SELECT COUNT(*) FROM acore_characters.character_queststatus s
+--   JOIN acore_characters.characters c ON c.guid=s.guid
+--   WHERE c.name='Andero' AND s.quest=<id>;
+-- and yet:
+--   .norgquest resolve Andero 976
+--     -> NQ|976|ok|t|3663|0|0|1|1|3185.5|189.4|4.8|787.1|Delgren the Purifier|
+--   .norgquest resolve Andero 62
+--     -> NQ|62|ok|t|240|0|0|0|0|-9465.5|74.0|56.8|0.0|Marshal Dughan|
+-- The server's resolver reads a missing quest-log slot as "no kills yet" and a
+-- missing quest-status entry as "the event already happened", so an unheld quest
+-- falls through to its turn-in NPC and comes back looking exactly like a real
+-- answer. That is now refused with NQ|<id>|unheld.
+--
+-- It never reached PLAYERS only because this addon can only ever name an id the
+-- SERVER put in a Q| batch, and the server builds those by walking its own quest
+-- log slots. The quest LOG is emphatically not that list: QuestTitles() reads
+-- every entry in it, including quests the server has declined to resolve and
+-- quests it has never mentioned. A title match that fell back to the log -- an
+-- easy and plausible-looking change, since that is where the titles come from --
+-- would ask the server to route something it never offered, and until the gate
+-- above it would have obliged. So this asserts the boundary directly rather than
+-- trusting the comment that describes it.
+sent = {}; chat = {}
+SlashCmdList["NORGQUEST"]("scan")               -- drop whatever earlier sections left
+quest("Q|4641:k:0:20:30:1")                     -- the server offers exactly one quest
+quest("E|1")
+
+sent = {}; chat = {}
+SlashCmdList["NORGQUEST"]("errand")             -- a title in the LOG, never in a Q|
+check("will not route a quest the server never listed",
+      sentMatching("^NORGQUEST GO ") == nil, tostring(lastSent()))
+check("...and says so rather than failing silently",
+      chatMatching("no resolvable quest matching") ~= nil, chat[#chat])
+
+sent = {}; chat = {}
+SlashCmdList["NORGQUEST"]("list")
+check("the listing is the server's answer, not the quest log",
+      chatMatching("Lazy Peons") ~= nil and chatMatching("Errand For Nobody") == nil,
+      chat[#chat])
+
+-- (!) A REFUSAL HAS TO LEAVE THE TABLE, NOT JUST THE ARROW. Clearing `tracked`
+-- alone would leave the quest in /quest list and re-selectable by title, so the
+-- player could hand it straight back to the server that had just refused it --
+-- and the server would answer, because the refusal is per-request and holds no
+-- state. Both halves are checked, because only the second one is load-bearing
+-- and only the first one is visible on screen.
+sent = {}; chat = {}
+quest("N|4641")                                 -- server: I cannot resolve that one
+SlashCmdList["NORGQUEST"]("list")
+check("a refused quest leaves the client's list, not just the arrow",
+      chatMatching("Lazy Peons") == nil and chatMatching("nothing resolved") ~= nil,
+      chat[#chat])
+
+sent = {}; chat = {}
+SlashCmdList["NORGQUEST"]("lazy")
+check("...so it cannot be re-tracked by title afterwards",
+      sentMatching("^NORGQUEST GO ") == nil
+        and chatMatching("no resolvable quest matching") ~= nil, tostring(lastSent()))
 
 -- =================================================================== garbage
 local ok = pcall(function()

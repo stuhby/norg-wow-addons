@@ -14,7 +14,7 @@ copy than this table describes.
 |---|---|---|---|
 | **NorgQuest** | 1.14 | `/quest` | Quest arrow that follows a real path, draws the route on the world map, and routes across continents by boat and zeppelin |
 | **NorgNav** | 2.11 | `/nav` | **The dungeon addon.** Arrow to the next boss, following a real path over the server's navmesh rather than a straight bearing — around corners, up ramps, across lifts and down drops |
-| **NorgGuide** | 1.0 | `/guide` | Ranked shortlist of the quests actually worth doing at your level — sorted by what they unlock, not just what you can accept. Click one to walk there |
+| **NorgGuide** | 1.1 | `/guide` | Ranked shortlist of the quests actually worth doing at your level — sorted by what they unlock, not just what you can accept. Click one to walk there |
 | **NorgHearth** | 1.2 | `/hs` | Save up to eight innkeeper binds and pick which one the hearthstone sends you to. Binding at an innkeeper saves itself |
 | **NorgAHValue** | 1.6 | `/ahprice` | Fills the auction sell slot at the highest price the server's auction-house bot will actually pay |
 | **NorgMail** | 1.6 | `/mail` | Empties the mailbox from one button, skipping C.O.D. and GM mail |

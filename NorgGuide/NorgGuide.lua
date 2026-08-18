@@ -25,22 +25,51 @@
 -- that the server does not also apply. Ask the server for a different list instead.
 --
 -- ---------------------------------------------------------------------------------
--- (!) A ROW WITH map 0 IS LISTED BUT NOT ROUTABLE, and that is a real state, not an
--- error -- item-started and event-started quests have no giver standing anywhere.
--- They are shown greyed with the click disabled rather than hidden, because silently
--- dropping them would make the plan look shorter than it is for no visible reason.
+-- (!) ROUTABILITY IS AN EXPLICIT FIELD ON THE WIRE. IT MUST NEVER BE INFERRED FROM
+-- THE MAP ID AGAIN.
+--
+-- Version 1.0 sent map 0 to mean "this quest has no giver standing anywhere" and this
+-- file tested `r.map ~= 0`. Map 0 IS EASTERN KINGDOMS -- 1,939 quests, the single
+-- largest giver map in the game -- so the sentinel collided with the most common real
+-- value it could possibly have picked. Every Eastern Kingdoms quest would have
+-- rendered dimmed and refused to route.
+--
+-- The protocol now carries a separate 0/1 `routable` column. A map id can never
+-- collide with it, and a future map id cannot reintroduce the bug.
 
 local ADDON   = "NorgGuide"
-local VERSION = "1.0"
+local VERSION = GetAddOnMetadata and (GetAddOnMetadata(ADDON, "Version") or "?") or "?"
 local PREFIX  = "NORGPLAN"
 
 local MAX_ROWS   = 10
 local ROW_HEIGHT = 30
 
--- Rows as last received. Rebuilt wholesale on every reply; never merged, because a
--- merge would leave a stale quest on screen after it stopped being eligible.
-local rows    = {}
-local pending = false
+-- Rows as last received, and the batch currently arriving.
+--
+-- (!) ROWS ARE SWAPPED IN WHOLESALE AT `E`, NEVER APPENDED AS THEY ARRIVE. Two
+-- /guide requests can be in flight at once -- a double keypress on a macro is enough
+-- -- and there is no "begin" marker in the protocol. Accumulating straight into the
+-- displayed list made the second reply CONCATENATE onto the first, so the window
+-- showed twenty rows, ten of them superseded, and the freshly computed plan was the
+-- half that got hidden. Buffering makes each reply atomic: last one wins, whole.
+local rows     = {}
+local incoming = {}
+
+-- Whether we have an outstanding request. Guards the window against opening on a
+-- message the player did not ask for -- see the sender check below.
+--
+-- (!) A FLAG, NOT A COUNTER, DELIBERATELY. Counting sends and decrementing on each
+-- reply looks more precise and is worse: a request that never gets answered -- the
+-- module missing after a rebuild, a dropped packet -- leaves permanent credit behind,
+-- so a later unsolicited reply would open the window and the bug would be invisible
+-- until it happened. A flag cannot drift. Two overlapping requests are still handled
+-- correctly: the first reply opens the window, the second silently refreshes it,
+-- which is what the player wants either way.
+local awaiting = false
+
+-- Set when the quest log changes under an open window. See the QUEST_* handlers.
+local stale = false
+
 local frame
 
 local function Say(msg)
@@ -53,6 +82,12 @@ end
 -- but only while mod-norg-nav is loaded. If the module is ever missing, a SAY would
 -- broadcast "NORGPLAN LIST 10" to everyone standing nearby. Whispering yourself means
 -- the worst case is a line only you can see. Same reasoning as NorgNav and NorgQuest.
+--
+-- (!) The server's handler swallows on the "NORGPLAN " prefix ALONE and ignores the
+-- chat type, so a SAY regression here would NOT be visible in normal play -- it would
+-- surface only on the day the module is absent, broadcasting the control protocol to
+-- everyone in range. guide_test.lua asserts the channel and the target for that
+-- reason; do not weaken it to asserting the message text only.
 local function Send(cmd)
     local me = UnitName and UnitName("player")
     if me then
@@ -65,7 +100,8 @@ end
 -- Colour a row by how much it unlocks, because that is the operator's stated
 -- priority: a quest that gates further content outranks one that pays slightly more
 -- and ends. Three bands, not a gradient -- a gradient reads as decoration, bands read
--- as a judgement.
+-- as a judgement. The boundaries are asserted in guide_test.lua; they are the whole
+-- meaning of the colour, so moving one is a behaviour change, not a tweak.
 local function UnlockColour(unlocks)
     if unlocks >= 8 then
         return "|cffff8000"          -- chain head: this opens a lot
@@ -87,11 +123,21 @@ local function Reason(r)
     if r.xp > 0 then
         table.insert(bits, r.xp .. " xp")
     end
-    if r.map == 0 then
+    if not r.routable then
         table.insert(bits, "|cff808080no giver to walk to|r")
     end
     if table.getn(bits) == 0 then
-        return "level " .. r.qlvl
+        -- (!) GUARD THE LEVEL FALLBACK. A quest that scales to the player is stored
+        -- with QuestLevel -1, and this branch is reached precisely by the rows that
+        -- have no xp and no unlocks -- which live observation showed are almost all
+        -- scaling quests. Printing "level -1" was the ONLY thing this fallback ever
+        -- actually rendered. The server now resolves -1 before sending; this stays as
+        -- the belt to that braces, because the failure is silent and looks like data
+        -- corruption to a player.
+        if r.qlvl and r.qlvl > 0 then
+            return "level " .. r.qlvl
+        end
+        return "worth a look"
     end
     return table.concat(bits, ", ")
 end
@@ -107,17 +153,31 @@ local function Refresh()
 
         if not r then
             btn:Hide()
+            -- (!) CLEAR THE IDENTITY, NOT JUST THE VISIBILITY. A hidden button keeps
+            -- whatever quest it last held, and the rows are globally named
+            -- NorgGuideRow1..10, so a `/click NorgGuideRow1` macro still fires it.
+            -- The reachable case is the ordinary empty answer: `E|0` hides every row
+            -- while row 1 stays stamped with a quest from the previous listing.
+            -- NorgHearth clears its slot for exactly this reason.
+            btn.questId  = nil
+            btn.routable = nil
         else
             btn:Show()
             btn.title:SetText(UnlockColour(r.unlocks) .. r.title .. "|r")
             btn.sub:SetText("|cff808080" .. Reason(r) .. "|r")
-            btn.questId = r.questId
-            btn.routable = (r.map ~= 0)
+            btn.questId  = r.questId
+            btn.routable = r.routable
 
             -- (!) Disabling the BUTTON would also grey the text we just coloured, so
             -- routability is carried on the button and checked in the click handler
             -- instead. The row still highlights on hover, which is correct: it is a
             -- real quest, it just has nowhere to walk to.
+            --
+            -- (!) READ IT FROM THE PARSED ROW. Version 1.0 wrote the flag onto the
+            -- BUTTON here and then tested it on the ROW -- a field ParseRow never
+            -- created -- so the test was always nil and EVERY row rendered dimmed.
+            -- The dim cue carried no information at all, and the test asserting
+            -- "unroutable row is dimmed" passed vacuously against it.
             if r.routable then
                 btn.title:SetAlpha(1.0)
             else
@@ -131,16 +191,24 @@ local function Refresh()
     else
         frame.empty:Hide()
     end
+
+    if frame.hint then
+        if stale then
+            frame.hint:SetText("|cffff8000Your quest log changed -- /guide to re-rank.|r")
+        else
+            frame.hint:SetText("Click a quest to walk there. Orange opens the most.")
+        end
+    end
 end
 
 -- ------------------------------------------------------------------------ wire
 
---   P|<id>|<score>|<xp>|<unlocks>|<qlvl>|<map>|<x>|<y>|<z>|<title>
+--   P|<id>|<score>|<xp>|<unlocks>|<qlvl>|<routable>|<map>|<x>|<y>|<z>|<title>
 --   E|<n>
 --   G|<id>          routing started
 --   X|<code>        refused
 --
--- (!) THE TITLE IS THE WHOLE REMAINDER, NOT THE TENTH FIELD. Nine numbers are read
+-- (!) THE TITLE IS THE WHOLE REMAINDER, NOT THE ELEVENTH FIELD. Ten numbers are read
 -- off the front and everything after them is the title, verbatim. Splitting the line
 -- into eleven fields instead would truncate at the first "|" a title ever contains --
 -- and while no 3.3.5a quest title does today, this is server data that gets hand-
@@ -149,7 +217,7 @@ end
 local function ParseRow(body)
     local fields = {}
     local rest   = body
-    for _ = 1, 9 do
+    for _ = 1, 10 do
         local bar = string.find(rest, "|", 1, true)
         if not bar then
             return nil
@@ -159,16 +227,17 @@ local function ParseRow(body)
     end
 
     return {
-        questId = tonumber(fields[1]) or 0,
-        score   = tonumber(fields[2]) or 0,
-        xp      = tonumber(fields[3]) or 0,
-        unlocks = tonumber(fields[4]) or 0,
-        qlvl    = tonumber(fields[5]) or 0,
-        map     = tonumber(fields[6]) or 0,
-        x       = tonumber(fields[7]) or 0,
-        y       = tonumber(fields[8]) or 0,
-        z       = tonumber(fields[9]) or 0,
-        title   = rest,
+        questId  = tonumber(fields[1]) or 0,
+        score    = tonumber(fields[2]) or 0,
+        xp       = tonumber(fields[3]) or 0,
+        unlocks  = tonumber(fields[4]) or 0,
+        qlvl     = tonumber(fields[5]) or 0,
+        routable = (fields[6] == "1"),
+        map      = tonumber(fields[7]) or 0,
+        x        = tonumber(fields[8]) or 0,
+        y        = tonumber(fields[9]) or 0,
+        z        = tonumber(fields[10]) or 0,
+        title    = rest,
     }
 end
 
@@ -177,33 +246,30 @@ local function OnAddonMessage(message)
     local body = string.sub(message, 3)
 
     if kind == "P" then
-        -- (!) THE FIRST ROW OF A REPLY CLEARS THE LAST ONE. There is no "begin"
-        -- marker in the protocol, so `pending` is what distinguishes the first row of
-        -- a new answer from a continuation. Without it a second /guide would append
-        -- to the first and show twenty rows, ten of them stale.
-        if pending then
-            rows = {}
-            pending = false
-        end
         local r = ParseRow(body)
         if r then
-            table.insert(rows, r)
+            table.insert(incoming, r)
         end
         return
     end
 
     if kind == "E" then
-        -- An empty answer still clears: pending survives when zero rows arrived.
-        if pending then
-            rows = {}
-            pending = false
-        end
+        rows     = incoming
+        incoming = {}
+        stale    = false
         Refresh()
-        if frame then
-            frame:Show()
-        end
-        if table.getn(rows) == 0 then
-            Say("nothing worth recommending at your level right now.")
+
+        -- (!) ONLY OPEN THE WINDOW FOR A REPLY WE ASKED FOR. Anyone can send this
+        -- addon a message (see the sender check in the event handler); without this,
+        -- a reply arriving after the player closed the window silently reopened it.
+        if awaiting then
+            awaiting = false
+            if frame then
+                frame:Show()
+            end
+            if table.getn(rows) == 0 then
+                Say("nothing worth recommending at your level right now.")
+            end
         end
         return
     end
@@ -218,7 +284,19 @@ local function OnAddonMessage(message)
             Say("that one has no giver standing anywhere -- it starts from an item or an event.")
         elseif body == "noroute" then
             Say("no way to get there from here.")
+        elseif body == "cooldown" then
+            Say("easy -- give it a couple of seconds and ask again.")
+        elseif string.sub(body, 1, 9) == "indungeon" then
+            local where = string.sub(body, 11)
+            if where == "" then
+                Say("that giver is inside a dungeon -- walk in and they are just past the entrance.")
+            else
+                Say("that giver is inside " .. where .. " -- walk in and they are just past the entrance.")
+            end
         else
+            -- (!) NAME THE CODE. A silent no-op is the worst possible answer to "why
+            -- did nothing happen", and an unrecognised code means the server is newer
+            -- than the addon -- which is exactly when the player needs to be told.
             Say("the server refused that (" .. body .. ").")
         end
         return
@@ -232,7 +310,7 @@ local function BuildFrame()
 
     -- (!) A REAL SIZE BEFORE SetBackdrop. A backdrop on a zero-size frame does not
     -- render and does not error -- the window is simply invisible with working
-    -- buttons in it. Same trap NorgHearth documents.
+    -- buttons in it. Same trap NorgHearth documents, and it cost NorgOneBag a version.
     --
     -- (!) AND NO SetSize -- it does not exist in 3.3.5a.
     f:SetWidth(340)
@@ -241,6 +319,15 @@ local function BuildFrame()
     f:SetFrameStrata("DIALOG")
     f:SetMovable(true)
     f:EnableMouse(true)
+
+    -- (!) CLAMP TO THE SCREEN. StartMoving preserves the grab offset, so grabbing
+    -- near the left edge and releasing at the right edge already puts a 340-wide
+    -- window entirely off-screen -- and the position is saved ACCOUNT-WIDE, so one
+    -- bad drag follows the player onto every character. There is no minimap button
+    -- to recover with, and /guide then prints nothing at all, so the addon simply
+    -- looks dead. /guide reset is the other half of this.
+    f:SetClampedToScreen(true)
+
     f:RegisterForDrag("LeftButton")
     f:SetScript("OnDragStart", function() f:StartMoving() end)
     f:SetScript("OnDragStop", function()
@@ -321,11 +408,19 @@ local function BuildFrame()
         f.rows[i] = btn
     end
 
-    local hint = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    hint:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 20, 20)
-    hint:SetWidth(290)
-    hint:SetJustifyH("LEFT")
-    hint:SetText("Click a quest to walk there. Orange opens the most.")
+    f.hint = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    f.hint:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 20, 20)
+    f.hint:SetWidth(290)
+    f.hint:SetJustifyH("LEFT")
+    f.hint:SetText("Click a quest to walk there. Orange opens the most.")
+
+    -- (!) ESCAPE MUST CLOSE IT. Of the addons here that build a dismissible panel
+    -- with a UIPanelCloseButton, this was the only one that did not register, so
+    -- Escape opened the Game Menu on top of the guide instead of dismissing it.
+    -- CloseSpecialWindows only touches shown entries, so this is side-effect free.
+    if UISpecialFrames then
+        tinsert(UISpecialFrames, "NorgGuideFrame")
+    end
 
     f:Hide()
     return f
@@ -336,6 +431,14 @@ end
 local ev = CreateFrame("Frame")
 ev:RegisterEvent("PLAYER_LOGIN")
 ev:RegisterEvent("CHAT_MSG_ADDON")
+-- (!) THE SPECIFIC QUEST EVENTS, NOT QUEST_LOG_UPDATE. The plan goes stale the moment
+-- the quest log changes -- accepting the top recommendation is itself what invalidates
+-- it, and the successors it just unlocked cannot appear until something re-asks. Only
+-- these three are registered because QUEST_LOG_UPDATE fires in bursts for every
+-- objective tick; NorgQuest documents that trap and its coalescing workaround.
+ev:RegisterEvent("QUEST_ACCEPTED")
+ev:RegisterEvent("QUEST_TURNED_IN")
+ev:RegisterEvent("QUEST_REMOVED")
 
 ev:SetScript("OnEvent", function(_, event, ...)
     if event == "PLAYER_LOGIN" then
@@ -350,16 +453,41 @@ ev:SetScript("OnEvent", function(_, event, ...)
             frame:SetPoint(p.p, UIParent, p.rp, p.x, p.y)
         end
 
-        Say(VERSION .. " loaded. /guide for a ranked shortlist of what to do next.")
+        Say("v" .. VERSION .. " loaded. /guide for a ranked shortlist of what to do next.")
         return
     end
 
     if event == "CHAT_MSG_ADDON" then
-        local prefix, message = ...
-        if prefix == PREFIX then
-            OnAddonMessage(message)
+        -- (!) THE SENDER AND THE CHANNEL ARE CHECKED, NOT JUST THE PREFIX.
+        --
+        -- Any player can send an addon message to any other player, and on the addon
+        -- language the server skips ALL of its sanitisation -- isNasty, hyperlink
+        -- validation and the fake-message check all sit inside `if (lang !=
+        -- LANG_ADDON)`. The title arrives here and goes straight into SetText, so a
+        -- stranger could force this window open displaying arbitrary UI escapes
+        -- (textures, hyperlinks, colour codes) and a fabricated quest list.
+        --
+        -- The module's own reply is built with the player as BOTH sender and
+        -- receiver, so requiring a self-whisper rejects everything else without
+        -- rejecting anything real. Dispatching on the prefix alone is a family-wide
+        -- habit here; this is the first one to stop.
+        local prefix, message, channel, sender = ...
+        if prefix ~= PREFIX then
+            return
         end
+        if channel ~= "WHISPER" or sender ~= UnitName("player") then
+            return
+        end
+        OnAddonMessage(message)
         return
+    end
+
+    -- Any of the three quest events. The window is not re-asked automatically -- that
+    -- would fight the server's per-player cooldown and could loop -- it is marked so
+    -- the hint line says what happened and what to do about it.
+    if frame and frame:IsShown() then
+        stale = true
+        Refresh()
     end
 end)
 
@@ -372,8 +500,20 @@ SlashCmdList["NORGGUIDE"] = function(arg)
         return
     end
 
+    if arg == "reset" then
+        NorgGuideDB.pos = nil
+        if frame then
+            frame:ClearAllPoints()
+            frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+            frame:Show()
+        end
+        Say("window moved back to the middle of the screen.")
+        return
+    end
+
     if arg == "help" then
-        Say("/guide -- ranked shortlist of what to do next. /guide <n> for n rows. /guide close.")
+        Say("/guide -- ranked shortlist of what to do next. /guide <n> for n rows. "
+            .. "/guide close. /guide reset if you have dragged it off-screen.")
         return
     end
 
@@ -386,6 +526,6 @@ SlashCmdList["NORGGUIDE"] = function(arg)
         Say("showing " .. MAX_ROWS .. " -- that is as many as this window holds.")
         n = MAX_ROWS
     end
-    pending = true
+    awaiting = true
     Send("LIST " .. (n or MAX_ROWS))
 end

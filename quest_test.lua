@@ -726,6 +726,49 @@ tick(0.2)
 check("an unrecognised kind letter still renders a sensible word",
       panelText():find("go to") ~= nil, panelText())
 
+-- ==================== value beats raw distance (the Raptor Thieves defect)
+-- (!) THE LIVE FAILURE THIS PINS: a level-23 with a full quest log was routed to
+-- "Raptor Thieves" -- QuestLevel 13, ~90 xp, the most outlevelled quest they had --
+-- purely because it was nearest. NorgQuest ranked on distance alone and had no idea
+-- what a quest was worth.
+--
+-- The server now sends a weight as a SEVENTH field. Weight 600 = grey.
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+sent = {}
+quest("Q|869:k:100:100:100:1:600|878:k:200:200:300:1:100")
+quest("E|2")
+check("a grey quest does NOT win on proximity alone",
+      sentMatching("NORGQUEST GO 878") ~= nil, tostring(lastSent()))
+
+-- ...but it still wins when nothing else is remotely close, because it is real work.
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+sent = {}
+quest("Q|869:k:100:100:100:1:600|878:k:200:200:5000:1:100")
+quest("E|2")
+check("a grey quest still wins when it is the only sane option",
+      sentMatching("NORGQUEST GO 869") ~= nil, tostring(lastSent()))
+
+-- (!) A TURN-IN IS NEVER PENALISED. A completed grey quest is ten seconds of walking
+-- for its whole reward, so the server sends weight 100 for kind 't' whatever its level.
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+sent = {}
+quest("Q|869:t:100:100:100:1:100|878:k:200:200:300:1:100")
+quest("E|2")
+check("a grey TURN-IN keeps full priority",
+      sentMatching("NORGQUEST GO 869") ~= nil, tostring(lastSent()))
+
+-- A row with no weight at all (an older server) must behave exactly as before.
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+sent = {}
+quest("Q|869:k:100:100:100:1|878:k:200:200:300:1")
+quest("E|2")
+check("a weightless row falls back to pure distance",
+      sentMatching("NORGQUEST GO 869") ~= nil, tostring(lastSent()))
+
 -- ============================ a NorgGuide pickup is just another task
 -- (!) THE POINT OF THE WHOLE FEATURE IS THAT THIS NEEDS NO SPECIAL HANDLING. A quest
 -- the player does not have yet arrives as kind 'n' in the same Q| batch as real

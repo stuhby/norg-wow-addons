@@ -150,9 +150,12 @@ local function chatMatching(p)
     for i = #chat, 1, -1 do if chat[i]:find(p, 1, true) then return chat[i] end end
 end
 -- P| row builder so fixtures stay readable. routable is the SIXTH field.
-local function P(id, score, xp, unlocks, qlvl, routable, map, title)
-    return string.format("P|%d|%s|%d|%d|%d|%d|%d|1.0|2.0|3.0|%s",
-                         id, score, xp, unlocks, qlvl, routable, map, title)
+-- state: 0 listed, 1 queued for the arrow, 2 pinned by clicking.
+-- dist: yards to the giver, -1 = another map.
+local function P(id, score, xp, unlocks, qlvl, routable, map, title, state, dist)
+    return string.format("P|%d|%s|%d|%d|%d|%d|%d|%d|%d|1.0|2.0|3.0|%s",
+                         id, score, xp, unlocks, qlvl, routable,
+                         state or 0, dist or 100, map, title)
 end
 
 -- =============================================================== login and build
@@ -234,14 +237,18 @@ msg(P(2, "1", 100, 7, 10, 1, 1, "Seven"))
 msg(P(3, "1", 100, 1, 10, 1, 1, "One"))
 msg(P(4, "1", 100, 0, 10, 1, 1, "Zero"))
 msg("E|4")
-check("8 unlocks is orange", string.sub(row(1).title:GetText(), 1, 10) == "|cffff8000",
-      string.sub(row(1).title:GetText(), 1, 10))
-check("7 unlocks is green (boundary)", string.sub(row(2).title:GetText(), 1, 10) == "|cff1eff00",
-      string.sub(row(2).title:GetText(), 1, 10))
-check("1 unlock is green", string.sub(row(3).title:GetText(), 1, 10) == "|cff1eff00",
-      string.sub(row(3).title:GetText(), 1, 10))
-check("0 unlocks is white", string.sub(row(4).title:GetText(), 1, 10) == "|cffffffff",
-      string.sub(row(4).title:GetText(), 1, 10))
+-- (!) THE COLOUR IS NO LONGER THE FIRST THING IN THE STRING. Titles now carry a state
+-- mark and a rank number in front, so a byte-1 comparison tests the layout rather than
+-- the colour band. Assert the code is PRESENT, and keep the boundaries (8 vs 7) which
+-- are the actual meaning.
+check("8 unlocks is orange", row(1).title:GetText():find("|cffff8000", 1, true) ~= nil,
+      row(1).title:GetText())
+check("7 unlocks is green (boundary)", row(2).title:GetText():find("|cff1eff00", 1, true) ~= nil,
+      row(2).title:GetText())
+check("1 unlock is green", row(3).title:GetText():find("|cff1eff00", 1, true) ~= nil,
+      row(3).title:GetText())
+check("0 unlocks is white", row(4).title:GetText():find("|cffffffff", 1, true) ~= nil,
+      row(4).title:GetText())
 
 -- ================================================================ clicking a row
 slash("")
@@ -293,7 +300,7 @@ check("unroutable row is dimmed", row(1).title:GetAlpha() < 1.0, row(1).title:Ge
 -- is the naive map-0 fix and this is what catches it.
 check("an unroutable row is still LISTED, not hidden", row(1):IsShown() == true)
 check("unroutable row says so in its reason",
-      row(1).sub:GetText():find("no giver to walk to", 1, true) ~= nil, row(1).sub:GetText())
+      row(1).sub:GetText():find("nobody to walk to", 1, true) ~= nil, row(1).sub:GetText())
 
 -- ================================================================= title parsing
 slash("")
@@ -343,7 +350,7 @@ check("a dungeon giver names the dungeon",
 msg("X|WOMBAT")
 check("an unknown refusal code is still reported", chatMatching("WOMBAT") ~= nil)
 msg("G|1234")
-check("a routing confirmation points at the arrow", chatMatching("NorgNav arrow") ~= nil)
+check("a pin promises the arrow keeps working", chatMatching("nothing disappears") ~= nil)
 
 -- ======================================================= foreign / spoofed traffic
 -- NorgQuest emits E|, G| and X| on the same CHAT_MSG_WHISPER/LANG_ADDON path.
@@ -425,7 +432,7 @@ slash("")
 msg(P(1, "1", 100, 0, 10, 1, 1, "Something"))
 msg("E|1")
 check("a fresh listing clears the stale notice",
-      byName["NorgGuideFrame"].hint:GetText():find("Click a quest", 1, true) ~= nil,
+      byName["NorgGuideFrame"].hint:GetText():find("queued for the arrow", 1, true) ~= nil,
       byName["NorgGuideFrame"].hint:GetText())
 
 -- ============================================================ slash-command surface
@@ -440,6 +447,48 @@ _G.NorgGuideDB.pos = { p = "TOPLEFT", rp = "TOPLEFT", x = -9000, y = 9000 }
 slash("reset")
 check("/guide reset clears the saved position", _G.NorgGuideDB.pos == nil)
 check("/guide reset shows the window again", byName["NorgGuideFrame"]:IsShown() == true)
+
+-- ================================ the queue is VISIBLE before the arrow moves
+-- (!) THIS IS THE FEEDBACK THAT PROMPTED IT: "There's also no way for me to know
+-- when/if it is automatically routing me to these quest pickups until it happens."
+-- The server marks which rows are actually in NorgQuest's candidate pool, so the
+-- window can say so in advance rather than leaving the player to infer it afterwards.
+slash("")
+msg(P(1, "9", 100, 0, 10, 1, 1, "Just listed",  0, 300))
+msg(P(2, "9", 100, 0, 10, 1, 1, "Queued one",   1, 200))
+msg(P(3, "9", 100, 0, 10, 1, 1, "Pinned one",   2, 100))
+msg("E|3")
+check("a plain row carries no queue marker",
+      row(1).title:GetText():find("*", 1, true) == nil
+      and row(1).title:GetText():find(">", 1, true) == nil, row(1).title:GetText())
+check("a queued row is marked", row(2).title:GetText():find("*", 1, true) ~= nil,
+      row(2).title:GetText())
+check("a pinned row is marked differently",
+      row(3).title:GetText():find(">", 1, true) ~= nil, row(3).title:GetText())
+
+-- Distance must be visible -- its absence is why the list read as xp-ranked.
+check("the row shows how far the giver is",
+      row(1).sub:GetText():find("300 yd", 1, true) ~= nil, row(1).sub:GetText())
+slash("")
+msg(P(9, "9", 100, 0, 10, 1, 1, "Far away", 0, -1))
+msg("E|1")
+check("a cross-map giver says so instead of a yard count",
+      row(1).sub:GetText():find("another continent", 1, true) ~= nil, row(1).sub:GetText())
+
+-- ================================ clicking PINS, it does not seize the arrow
+-- (!) THE OPERATOR'S BUG, ASSERTED: "when I click it, my quest arrow disappears, I
+-- want it back". The click must still send GO -- the server turns that into a pin --
+-- and the addon must NOT promise a NorgNav arrow, because NorgQuest keeps the arrow.
+slash("")
+msg(P(4321, "30", 900, 3, 21, 1, 1, "A Ring of Twilight", 0, 150))
+msg("E|1")
+click(row(1))
+check("clicking still asks the server", lastText() == "NORGPLAN GO 4321", lastText())
+msg("G|4321")
+check("and the reply promises the arrow survives",
+      chatMatching("nothing disappears") ~= nil)
+check("it does NOT claim a NorgNav arrow appears",
+      chatMatching("NorgNav arrow") == nil)
 
 -- ======================================================================== summary
 print("")

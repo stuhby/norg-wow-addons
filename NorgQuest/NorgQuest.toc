@@ -2,7 +2,7 @@
 ## Title: Norg Quest
 ## Notes: Server-resolved quest objectives with real navmesh routing. Open world; NorgNav owns instances.
 ## Author: Norg
-## Version: 1.15
+## Version: 1.16
 ## SavedVariables: NorgQuestDB
 ## OptionalDeps: NorgNav
 

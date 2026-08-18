@@ -755,7 +755,12 @@ local function Sorted()
     -- yards away from a player standing in Elwynn Forest.
     table.sort(list, function(a, b)
         if a.o.sameMap ~= b.o.sameMap then return a.o.sameMap end
-        return a.o.dist < b.o.dist
+        -- (!) SORT ON THE WEIGHTED DISTANCE, NOT THE TRUE ONE. This single line is
+        -- what stopped a level-23 being routed to a 90xp grey simply because it was
+        -- nearest. A quest the character has outlevelled is treated as several times
+        -- further away than it is; a turn-in, or anything that gates further content,
+        -- keeps its true distance. See NorgPlanQuestWeight on the server.
+        return (a.o.sortDist or a.o.dist) < (b.o.sortDist or b.o.dist)
     end)
     return list
 end
@@ -887,8 +892,11 @@ local function AutoTrack()
             if top.o.sameMap and not o.sameMap then
                 jump = true
             elseif o.sameMap == top.o.sameMap then
-                jump = o.dist > top.o.dist * SWITCH_RATIO
-                    and o.dist - top.o.dist > SWITCH_MIN_YARDS
+                -- The commit check uses the SAME weighted number the sort used, or a
+                -- grey quest could win the sort and then be held by a commit measured
+                -- on a distance nothing else agreed with.
+                jump = (o.sortDist or o.dist) > (top.o.sortDist or top.o.dist) * SWITCH_RATIO
+                    and (o.sortDist or o.dist) - (top.o.sortDist or top.o.dist) > SWITCH_MIN_YARDS
             end
         end
 
@@ -954,12 +962,25 @@ local function OnQuestMessage(msg)
 
     if kind == "Q" then
         -- Q|<id>:<kind>:<x>:<y>:<dist>:<sameMap>|... (several per message)
-        for id, k, x, y, d, same in msg:gmatch("(%d+):(%a):(%-?%d+):(%-?%d+):(%d+):([01])") do
+        -- (!) THE WEIGHT IS OPTIONAL IN THE PATTERN, ON PURPOSE. The server appends a
+        -- seventh field, but a server that predates it must still parse -- and this is
+        -- the addon that ships publicly, so it can meet an older module. `:?(%d*)`
+        -- captures an empty string in that case and the fallback below reads 100.
+        for id, k, x, y, d, same, w in
+            msg:gmatch("(%d+):(%a):(%-?%d+):(%-?%d+):(%d+):([01]):?(%d*)") do
+            local weight = tonumber(w) or 100
+            if weight < 100 then weight = 100 end
             objectives[tonumber(id)] = {
                 kind = k,
                 x = tonumber(x), y = tonumber(y),
                 dist = tonumber(d),
                 sameMap = (same == "1"),
+                -- (!) TWO DISTANCES, DELIBERATELY. `dist` is the truth and is what gets
+                -- DISPLAYED; `sortDist` is what the arrow ARBITRATES on. Weighting the
+                -- displayed number instead would have made /quest list report a grey
+                -- quest as four times further away than it is.
+                weight = weight,
+                sortDist = tonumber(d) * weight / 100,
             }
         end
         return

@@ -2,7 +2,7 @@
 ## Title: Norg Guide
 ## Notes: Ranked shortlist of the quests worth doing at your level.
 ## Author: Norg
-## Version: 1.1
+## Version: 1.2
 ## SavedVariables: NorgGuideDB
 
 NorgGuide.lua

@@ -112,19 +112,38 @@ local function UnlockColour(unlocks)
 end
 
 -- (!) THE SUBTITLE NAMES THE REASON, NOT THE SCORE. A bare number is unarguable-
+-- How far, in words. Distance was completely absent from v1.1, which is half of why
+-- the list read as arbitrary: a quest 80 yards away and one on another continent
+-- looked identical, so the only visible number was xp and the list appeared to be
+-- ranked on xp alone.
+local function Where(r)
+    if not r.routable then
+        return "|cff808080nobody to walk to|r"
+    end
+    if r.dist and r.dist >= 0 then
+        return r.dist .. " yd"
+    end
+    return "another continent"
+end
+
+-- (!) THE SUBTITLE NAMES THE REASON, NOT THE SCORE. A bare number is unarguable-
 -- looking and tells nobody why one quest beat another; the whole reason the server
--- sends the terms separately is so this line can say which one dominated. Ordered by
--- what the operator said they cared about: what it unlocks first, reward second.
+-- sends the terms separately is so this line can say which one dominated.
+--
+-- (!) AND IT LEADS WITH WHAT THE RANKING ACTUALLY USES. The operator's verdict on the
+-- first version: "it clearly ranks on xp given, but idk how it prioritizes beyond
+-- that". Unlocks are the PRIMARY signal and were shown in the same grey as everything
+-- else, while xp -- which is deliberately NOT the main term -- was the number that
+-- stood out. So unlocks come first and in colour, then distance, then xp last.
 local function Reason(r)
     local bits = {}
     if r.unlocks >= 1 then
-        table.insert(bits, "opens " .. r.unlocks .. (r.unlocks == 1 and " quest" or " quests"))
+        table.insert(bits, "|cff1eff00opens " .. r.unlocks
+                     .. (r.unlocks == 1 and " quest" or " quests") .. "|r")
     end
+    table.insert(bits, Where(r))
     if r.xp > 0 then
         table.insert(bits, r.xp .. " xp")
-    end
-    if not r.routable then
-        table.insert(bits, "|cff808080no giver to walk to|r")
     end
     if table.getn(bits) == 0 then
         -- (!) GUARD THE LEVEL FALLBACK. A quest that scales to the player is stored
@@ -139,7 +158,22 @@ local function Reason(r)
         end
         return "worth a look"
     end
-    return table.concat(bits, ", ")
+    return table.concat(bits, "  ")
+end
+
+-- What the row is doing right now, as a prefix on the title.
+--
+-- (!) THIS IS THE ANSWER TO "no way for me to know when/if it is automatically routing
+-- me to these until it happens". The server marks which rows are actually in
+-- NorgQuest's task pool, so the window can say so BEFORE the arrow moves rather than
+-- leaving the player to infer it afterwards.
+local function StateMark(r)
+    if r.state == 2 then
+        return "|cffffd100>|r "        -- pinned by clicking
+    elseif r.state == 1 then
+        return "|cff00b4ff*|r "        -- queued: the arrow may pick this next
+    end
+    return ""
 end
 
 local function Refresh()
@@ -163,7 +197,8 @@ local function Refresh()
             btn.routable = nil
         else
             btn:Show()
-            btn.title:SetText(UnlockColour(r.unlocks) .. r.title .. "|r")
+            btn.title:SetText(StateMark(r) .. "|cff808080" .. i .. ".|r "
+                              .. UnlockColour(r.unlocks) .. r.title .. "|r")
             btn.sub:SetText("|cff808080" .. Reason(r) .. "|r")
             btn.questId  = r.questId
             btn.routable = r.routable
@@ -196,7 +231,7 @@ local function Refresh()
         if stale then
             frame.hint:SetText("|cffff8000Your quest log changed -- /guide to re-rank.|r")
         else
-            frame.hint:SetText("Click a quest to walk there. Orange opens the most.")
+            frame.hint:SetText("|cff00b4ff*|r queued for the arrow   |cffffd100>|r pinned   -   click a row to pin it")
         end
     end
 end
@@ -217,7 +252,7 @@ end
 local function ParseRow(body)
     local fields = {}
     local rest   = body
-    for _ = 1, 10 do
+    for _ = 1, 12 do
         local bar = string.find(rest, "|", 1, true)
         if not bar then
             return nil
@@ -233,10 +268,17 @@ local function ParseRow(body)
         unlocks  = tonumber(fields[4]) or 0,
         qlvl     = tonumber(fields[5]) or 0,
         routable = (fields[6] == "1"),
-        map      = tonumber(fields[7]) or 0,
-        x        = tonumber(fields[8]) or 0,
-        y        = tonumber(fields[9]) or 0,
-        z        = tonumber(fields[10]) or 0,
+        -- 0 = listed only, 1 = queued as a task NorgQuest may route to, 2 = pinned
+        -- by clicking. This is what makes the automatic routing VISIBLE instead of
+        -- something you only discover once the arrow moves.
+        state    = tonumber(fields[7]) or 0,
+        -- Yards to the giver, or -1 when it is on another map. Distance was invisible
+        -- in v1.1, so a quest across the world looked identical to one next door.
+        dist     = tonumber(fields[8]) or -1,
+        map      = tonumber(fields[9]) or 0,
+        x        = tonumber(fields[10]) or 0,
+        y        = tonumber(fields[11]) or 0,
+        z        = tonumber(fields[12]) or 0,
         title    = rest,
     }
 end
@@ -275,7 +317,7 @@ local function OnAddonMessage(message)
     end
 
     if kind == "G" then
-        Say("routing there -- follow the NorgNav arrow.")
+        Say("pinned -- your quest arrow will head there next. It stays NorgQuest's arrow, so nothing disappears.")
         return
     end
 
@@ -412,7 +454,7 @@ local function BuildFrame()
     f.hint:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 20, 20)
     f.hint:SetWidth(290)
     f.hint:SetJustifyH("LEFT")
-    f.hint:SetText("Click a quest to walk there. Orange opens the most.")
+    f.hint:SetText("|cff00b4ff*|r queued for the arrow   |cffffd100>|r pinned   -   click a row to pin it")
 
     -- (!) ESCAPE MUST CLOSE IT. Of the addons here that build a dismissible panel
     -- with a UIPanelCloseButton, this was the only one that did not register, so

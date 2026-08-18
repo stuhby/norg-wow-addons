@@ -50,6 +50,13 @@ local KIND_WORD = {
     k = "kill",
     g = "use",
     i = "collect",
+    -- (!) 'n' IS A QUEST YOU DO NOT HAVE YET -- supplied by NorgGuide's ranking and
+    -- arbitrated here as an ordinary task, on distance, exactly like everything else
+    -- in this table. The caption has to make that obvious: the player is being sent
+    -- to an NPC whose quest is NOT in their log, and the "go to" fallback would leave
+    -- them hunting the quest list for something that is not there. See KIND_PICKUP in
+    -- norg_quest.cpp for why it is its own letter rather than reusing 'e'.
+    n = "pick up",
     e = "go to",     -- event: somebody to talk to, or something to watch happen
     -- (!) 'a' IS A PLACE AND HAS NOBODY IN IT. The server used to send these as
     -- 'e' carrying a "name" it had looked up from the QUEST id, so The Fargodeep

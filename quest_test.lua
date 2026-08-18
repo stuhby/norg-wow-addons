@@ -726,6 +726,50 @@ tick(0.2)
 check("an unrecognised kind letter still renders a sensible word",
       panelText():find("go to") ~= nil, panelText())
 
+-- ============================ a NorgGuide pickup is just another task
+-- (!) THE POINT OF THE WHOLE FEATURE IS THAT THIS NEEDS NO SPECIAL HANDLING. A quest
+-- the player does not have yet arrives as kind 'n' in the same Q| batch as real
+-- objectives and is arbitrated by the same nearest-first rule. If this ever grows its
+-- own branch in AutoTrack, the design has drifted and the two addons are competing
+-- again rather than sharing one queue.
+--
+-- The caption is asserted separately because it is the ONE thing that must differ:
+-- the player is being sent to an NPC whose quest is NOT in their log, and the "go to"
+-- fallback would send them hunting the quest list for something that is not there.
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+quest("Q|8888:n:100:100:40:1")
+quest("E|1")
+quest("G|8888|a|")
+nav("P|0.00|0.00|0.00|30.00|412|282|ok")
+tick(0.2)
+check("a pickup task is captioned 'pick up', not 'go to'",
+      panelText():find("pick up") ~= nil, panelText())
+
+-- Nearest wins across BOTH kinds. This is the arbitration the operator asked for --
+-- "they should both happen automatically and they both should complement each other"
+-- -- so it is pinned in both directions rather than just the flattering one.
+--
+-- (!) ASSERT WHAT THE ADDON ASKED TO ROUTE TO, NOT WHAT THE PANEL SAYS. The panel
+-- renders the last resolved-target G| message, so with no G| in the batch it keeps
+-- displaying the PREVIOUS pick and reads as a pass or a fail for reasons that have
+-- nothing to do with arbitration. The outgoing GO is the actual decision.
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+sent = {}
+quest("Q|8889:n:100:100:40:1|806:k:-390:-4180:900:1")
+quest("E|2")
+check("a near pickup outranks a distant kill",
+      sentMatching("NORGQUEST GO 8889") ~= nil, tostring(lastSent()))
+
+SlashCmdList["NORGQUEST"]("")
+SlashCmdList["NORGQUEST"]("scan")
+sent = {}
+quest("Q|7777:n:100:100:900:1|806:k:-390:-4180:40:1")
+quest("E|2")
+check("a distant pickup does NOT displace a near objective",
+      sentMatching("NORGQUEST GO 806") ~= nil, tostring(lastSent()))
+
 -- ==================================== /quest list knows about both marker kinds
 SlashCmdList["NORGQUEST"]("")
 SlashCmdList["NORGQUEST"]("scan")

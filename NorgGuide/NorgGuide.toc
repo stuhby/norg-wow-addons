@@ -1,0 +1,8 @@
+## Interface: 30300
+## Title: Norg Guide
+## Notes: Ranked shortlist of the quests worth doing at your level.
+## Author: Norg
+## Version: 1.0
+## SavedVariables: NorgGuideDB
+
+NorgGuide.lua

@@ -5,8 +5,8 @@ NorgAHValue_Mult = {
   [1] = 3,   -- common
   [2] = 5,  -- uncommon
   [3] = 12,   -- rare
-  [4] = 15,   -- epic
-  [5] = 20,   -- legendary
-  [6] = 22,   -- artifact
-  [7] = 22,   -- heirloom (shares the artifact multiplier upstream)
+  [4] = 20,   -- epic
+  [5] = 40,   -- legendary
+  [6] = 60,   -- artifact
+  [7] = 60,   -- heirloom (shares the artifact multiplier upstream)
 }

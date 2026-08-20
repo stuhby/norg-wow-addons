@@ -165,13 +165,25 @@ check("and announces itself exactly ONCE",
 --   Deviate Scale(6470) SellPrice 20, quality 1, BuyPrice 80  -- listed x3  at 540
 --   Silk Cloth   (4306) SellPrice 150,quality 1, BuyPrice 600 -- listed x2  at 1800
 --   Tigerseye    (818)  SellPrice 100,quality 2, BuyPrice 400 -- listed x2  at 2000
+-- (!) THE BASE IS READ FROM THE GENERATED TABLE, NEVER HARDCODED. It used to be a
+-- literal SellPrice on each row, and every one went stale the moment server pricing
+-- changed -- eight assertions failed at once, all reporting a defect that did not
+-- exist. What DataSell.lua holds is no longer a raw SellPrice either: it is the
+-- EFFECTIVE base, with the trade-goods premium, the rarity band, reputation and any
+-- flat override already folded in by gen-ahvalue-addon.sh. Reading it here means this
+-- suite tests the addon's ARITHMETIC against whatever the server currently pays, which
+-- is the only thing it can honestly assert.
 local cases = {
-    { id = 2589, name = "Linen Cloth",   sell = 13,  buy = 55,  q = 1, count = 12, wasListed = 5616 },
-    { id = 6470, name = "Deviate Scale", sell = 20,  buy = 80,  q = 1, count = 3,  wasListed = 540,  novendor = true },
-    { id = 4306, name = "Silk Cloth",    sell = 150, buy = 600, q = 1, count = 2,  wasListed = 1800 },
-    { id = 818,  name = "Tigerseye",     sell = 100, buy = 400, q = 2, count = 2,  wasListed = 2000, novendor = true },
-    { id = 2287, name = "Haunch of Meat",sell = 6,   buy = 125, q = 1, count = 1,  wasListed = 18   },
+    { id = 2589, name = "Linen Cloth",   buy = 55,  q = 1, count = 12 },
+    { id = 6470, name = "Deviate Scale", buy = 80,  q = 1, count = 3,  novendor = true },
+    { id = 4306, name = "Silk Cloth",    buy = 600, q = 1, count = 2  },
+    { id = 818,  name = "Tigerseye",     buy = 400, q = 2, count = 2,  novendor = true },
+    { id = 2287, name = "Haunch of Meat",buy = 125, q = 1, count = 1  },
 }
+for _, c in ipairs(cases) do
+    c.sell = NorgAHValue_Sell[c.id]
+    assert(c.sell, "DataSell.lua has no entry for item " .. c.id)
+end
 
 for _, c in ipairs(cases) do
     placed = {}
@@ -200,8 +212,8 @@ for _, c in ipairs(cases) do
     -- what the client will actually list, from what the addon typed
     local listed = (_G._priceMode == 1) and ((placed.buyout or 0) * c.count) or placed.buyout
     local got = placed.buyout
-    check(string.format("%s x%d priced at the bot's max (%d, not %d)",
-                        c.name, c.count, want, c.wasListed),
+    check(string.format("%s x%d priced at the bot's max (%d)",
+                        c.name, c.count, want),
           got == want, "addon put " .. tostring(got))
 end
 
@@ -230,6 +242,11 @@ end
 -- ============================ switching the dropdown must RE-PRICE the slot
 -- (!) The fill happens on item change. The mode is not part of the item, so a
 -- flip mid-listing would leave the old number and the client would multiply it.
+-- (!) DERIVED, NOT A LITERAL. This was hardcoded 900 and broke the moment the
+-- generated base changed, reporting a defect that was not there. botMax() is the
+-- same helper the cases above use, so this stays correct through any repricing.
+local silkWant = botMax(NorgAHValue_Sell[4306], 2, 1, 600)
+
 _G._priceMode = 2
 placed = {}
 sellSlot = { name = "Silk Cloth", count = 2, quality = 1,
@@ -240,14 +257,14 @@ for _, fr in ipairs(allFrames) do
 end
 ev._scripts["OnEvent"](ev, "NEW_AUCTION_UPDATE")
 ev._scripts["OnUpdate"](ev); ev._scripts["OnUpdate"](ev)
-check("per stack fills the total", placed.buyout == 900, tostring(placed.buyout))
+check("per stack fills the total", placed.buyout == silkWant, tostring(placed.buyout))
 
 -- now flip the dropdown WITHOUT touching the item
 _G._priceMode = 1
 placed = {}
 ev._scripts["OnUpdate"](ev); ev._scripts["OnUpdate"](ev); ev._scripts["OnUpdate"](ev)
 local listed = (placed.buyout or 0) * 2
-check("flipping to per item re-prices the slot", listed == 900,
+check("flipping to per item re-prices the slot", listed == silkWant,
       "typed " .. tostring(placed.buyout) .. " -> client lists " .. listed)
 
 print(string.format("\n  ==== %d passed, %d failed ====", pass, fail))

@@ -103,6 +103,10 @@ local function BotUnitPrice(itemID, quality)
     local cap = NorgAHValue_VendorCost and NorgAHValue_VendorCost[itemID]
     if cap and cap > 0 and bid > cap then bid = cap end
 
+    -- Same farm ceiling the bot applies; see NorgAHValue.lua BotBid.
+    local farm = NorgAHValue_FarmCap and NorgAHValue_FarmCap[itemID]
+    if farm and farm > 0 and bid > farm then bid = farm end
+
     return math.floor(bid)
 end
 

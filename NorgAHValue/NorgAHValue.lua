@@ -72,6 +72,15 @@ local function BotBid(itemID, quality)
         capped = true
     end
 
+    -- Never above what the item can be FARMED for. The bot applies this ceiling
+    -- too (g_norgFarmCap), so a quote that ignored it would price the auction out
+    -- of reach and the listing would silently expire unsold.
+    local farm = NorgAHValue_FarmCap and NorgAHValue_FarmCap[itemID]
+    if farm and farm > 0 and bid > farm then
+        bid = farm
+        capped = true
+    end
+
     return bid, capped
 end
 

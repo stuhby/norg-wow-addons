@@ -2,12 +2,13 @@
 ## Title: Norg AH Value
 ## Notes: Bot buy prices in tooltips, and auto-fills the AH sell price with fees worked out.
 ## Author: Norg
-## Version: 1.7
+## Version: 1.8
 ## SavedVariables:
 
 # Load order matters: the data tables must exist before the logic runs.
 Config.lua
 DataSell.lua
 DataVendor.lua
+DataFarmCap.lua
 NorgAHValue.lua
 AutoPrice.lua

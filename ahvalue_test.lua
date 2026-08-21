@@ -126,10 +126,22 @@ local BOT_MULT = { [0] = 1, [1] = 3, [2] = 5, [3] = 12, [4] = 15, [5] = 20 }
 -- BuyPrice 400 and ZERO vendors, so it is uncapped -- my first version of this
 -- helper capped on BuyPrice alone and reported a bug in the addon that did not
 -- exist. Model the real condition.
-local function botMax(sell, count, quality, vendorBuy)
+--
+-- (!) NARROWED 2026-08-21: NpcItems is built from maxcount = 0, i.e. UNLIMITED
+-- stock only, because only an unlimited vendor can fund arbitrage. Linen and Silk
+-- Cloth each have exactly ONE limited-stock vendor, so the bot does NOT cap them
+-- and pays the full 78 / 900 per unit. This suite asserted the old capped 55 / 600
+-- and failed six times against correct code. Haunch of Meat (58 unlimited vendors)
+-- is kept as the positive control that the cap still binds when it should.
+local function botMax(sell, count, quality, vendorBuy, farmCap)
     local bid = sell * count * BOT_MULT[quality]
     if vendorBuy and vendorBuy > 0 then
         local cap = vendorBuy * count
+        if bid > cap then bid = cap end
+    end
+    -- farm cap: ceiling on the bid from how fast the item can be farmed
+    if farmCap and farmCap > 0 then
+        local cap = farmCap * count
         if bid > cap then bid = cap end
     end
     return math.floor(bid)
@@ -174,9 +186,11 @@ check("and announces itself exactly ONCE",
 -- suite tests the addon's ARITHMETIC against whatever the server currently pays, which
 -- is the only thing it can honestly assert.
 local cases = {
-    { id = 2589, name = "Linen Cloth",   buy = 55,  q = 1, count = 12 },
+    -- novendor = the bot applies NO vendor cap. True when the item has no vendor at
+    -- all (Tigerseye, Deviate Scale) OR only LIMITED-stock ones (Linen, Silk).
+    { id = 2589, name = "Linen Cloth",   buy = 55,  q = 1, count = 12, novendor = true },
     { id = 6470, name = "Deviate Scale", buy = 80,  q = 1, count = 3,  novendor = true },
-    { id = 4306, name = "Silk Cloth",    buy = 600, q = 1, count = 2  },
+    { id = 4306, name = "Silk Cloth",    buy = 600, q = 1, count = 2,  novendor = true },
     { id = 818,  name = "Tigerseye",     buy = 400, q = 2, count = 2,  novendor = true },
     { id = 2287, name = "Haunch of Meat",buy = 125, q = 1, count = 1  },
 }
@@ -245,7 +259,9 @@ end
 -- (!) DERIVED, NOT A LITERAL. This was hardcoded 900 and broke the moment the
 -- generated base changed, reporting a defect that was not there. botMax() is the
 -- same helper the cases above use, so this stays correct through any repricing.
-local silkWant = botMax(NorgAHValue_Sell[4306], 2, 1, 600)
+-- (!) nil, not 600. Silk Cloth has one LIMITED-stock vendor, so it is not in
+-- NpcItems and the bot applies no vendor cap -- see the fixture note above.
+local silkWant = botMax(NorgAHValue_Sell[4306], 2, 1, nil)
 
 _G._priceMode = 2
 placed = {}

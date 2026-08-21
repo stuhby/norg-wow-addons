@@ -14,9 +14,8 @@ copy than this table describes.
 |---|---|---|---|
 | **NorgQuest** | 1.16 | `/quest` | Quest arrow that follows a real path, draws the route on the world map, and routes across continents by boat and zeppelin |
 | **NorgNav** | 2.11 | `/nav` | **The dungeon addon.** Arrow to the next boss, following a real path over the server's navmesh rather than a straight bearing — around corners, up ramps, across lifts and down drops |
-| **NorgGuide** | 1.2 | `/guide` | Ranked shortlist of the quests actually worth doing at your level — sorted by what they unlock, not just what you can accept. Click one to walk there |
 | **NorgHearth** | 1.2 | `/hs` | Save up to eight innkeeper binds and pick which one the hearthstone sends you to. Binding at an innkeeper saves itself |
-| **NorgAHValue** | 1.7 | `/ahprice` | Fills the auction sell slot at the highest price the server's auction-house bot will actually pay |
+| **NorgAHValue** | 1.8 | `/ahprice` | Fills the auction sell slot at the highest price the server's auction-house bot will actually pay |
 | **NorgMail** | 1.6 | `/mail` | Empties the mailbox from one button, skipping C.O.D. and GM mail |
 | **NorgOneBag** | 1.1 | `/onebag` | Single-bag inventory view |
 | **!NorgBugs** | 1.0 | `/bugs` | Catches Lua errors and shows them in a window you can copy out of. Install this before reporting that something "did nothing" |
@@ -44,16 +43,10 @@ no line means the folder was never indexed, and a full restart fixes it.
 
 ## Server support
 
-**NorgQuest**, **NorgNav**, **NorgGuide** and **NorgHearth** are thin clients. Pathing,
+**NorgQuest**, **NorgNav** and **NorgHearth** are thin clients. Pathing,
 quest-objective resolution, transport routing and the stored hearthstone binds all
 happen server-side in a companion module, and the addon talks to it over the addon
 message channel. Without that module they will load and do nothing useful.
-
-**NorgGuide** decides nothing at all on the client. Which quests you can take is
-`Player::CanTakeQuest` — all seventeen of the core's own eligibility checks, including
-prerequisite chains and exclusive groups the client cannot see. The ranking, and the
-route when you click a row, are computed on the server for the same reason. The window
-is a display for an answer it did not compute.
 
 NorgHearth in particular is not a teleport and cannot invent a bind: saving only
 copies the bind the server already holds for you, so a bind still has to be made

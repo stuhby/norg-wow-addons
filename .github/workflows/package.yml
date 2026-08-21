@@ -42,7 +42,13 @@ jobs:
           # but the zip is named without the "!" so the download URL stays clean.
           for dir in */; do
             name="${dir%/}"
+            # (!) NorgGuide is DELIBERATELY NOT PACKAGED. It is unfinished, and a
+            # half-working addon in the release is worse than none: people install
+            # it, it misbehaves, and it costs trust in the ones that do work. The
+            # code stays in the repo so the work is not lost -- only the release
+            # build skips it. Delete the NorgGuide line to start shipping it again.
             case "$name" in
+              NorgGuide) echo "  skipping $name (unfinished)"; continue ;;
               *Norg*) ;;
               *) continue ;;
             esac
@@ -56,7 +62,7 @@ jobs:
 
           # A single archive for anyone who just wants the lot.
           zip -q -r dist/Norg-All-Addons.zip . \
-            -x '.git/*' '.github/*' 'dist/*' '*_test.lua' 'test_harness.lua'
+            -x '.git/*' '.github/*' 'dist/*' '*_test.lua' 'test_harness.lua' 'NorgGuide/*'
 
           ls -la dist/
 

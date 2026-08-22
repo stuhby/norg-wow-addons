@@ -75,7 +75,7 @@ NorgNavBosses = {
   },
   [90] = {   -- Gnomeregan
     {i=1,n='Viscous Fallout',x=-471.4,y=48.5,z=-207.9,g=30137},
-    {i=2,n='Grubbis',x=-495.2,y=-90.8,z=-149.5,g=0,ap=1,tg=0,t='escort emi shortfuse, grubbis and chomper ambush here'},
+    {i=2,n='Grubbis',x=-514.9,y=-138.5,z=-152.4,g=0,ap=1,tg=0,t='talk to blastmaster emi shortfuse and escort him, grubbis and chomper ambush on the way'},
     {i=3,n='Electrocutioner 6000',x=-552.0,y=502.9,z=-216.7,g=30133},
     {i=4,n='Crowd Pummeler 9-60',x=-889.1,y=360.7,z=-272.5,g=30121},
     {i=5,n='Mekgineer Thermaplugg',x=-531.3,y=670.2,z=-325.2,g=30139},
